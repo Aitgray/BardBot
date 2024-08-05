@@ -73,16 +73,24 @@ class VoiceRecorder(commands.Cog):
         print("Start recording command invoked")
         await ctx.send("Start recording command invoked")
         if self.voice_client and not self.recording:
-            self.recording = True
-            self.audio_frames = []
-            ffmpeg_cmd = [
-                'ffmpeg', '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', '-',
-                f'recording_{ctx.guild.id}.wav'
-            ]
-            self.process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-            self.voice_client.listen(discord.FFmpegPCMAudio('-', pipe=self.process.stdin))
-            print("Started recording.")
-            await ctx.send("Started recording.")
+            try:
+                self.recording = True
+                self.audio_frames = []
+                # Explicit path to ffmpeg
+                ffmpeg_path = 'C:\\Users\\aidan\\ffmpeg\\ffmpeg-master-latest-win64-gpl\\ffmpeg.exe'  # Replace with your ffmpeg path
+                ffmpeg_cmd = [
+                    ffmpeg_path, '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', '-',
+                    f'recording_{ctx.guild.id}.wav'
+                ]
+                print(f"Running ffmpeg command: {' '.join(ffmpeg_cmd)}")
+                self.process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+                print("FFmpeg subprocess started.")
+                self.voice_client.listen(discord.FFmpegPCMAudio('-', pipe=self.process.stdin))
+                print("Started listening to voice client.")
+                await ctx.send("Started recording.")
+            except Exception as e:
+                print(f"Error during start_recording: {e}")
+                await ctx.send(f"Error during start_recording: {e}")
         else:
             print("Bot is not connected to a voice channel or already recording.")
             await ctx.send("Bot is not connected to a voice channel or already recording.")
@@ -92,14 +100,18 @@ class VoiceRecorder(commands.Cog):
         print("Stop recording command invoked")
         await ctx.send("Stop recording command invoked")
         if self.recording:
-            self.recording = False
-            if self.process:
-                self.process.stdin.close()
-                self.process.wait()
-                self.process = None
-            print("Stopped recording.")
-            await ctx.send("Stopped recording.")
-            await self.save_audio(ctx)
+            try:
+                self.recording = False
+                if self.process:
+                    self.process.stdin.close()
+                    self.process.wait()
+                    self.process = None
+                print("Stopped recording.")
+                await ctx.send("Stopped recording.")
+                await self.save_audio(ctx)
+            except Exception as e:
+                print(f"Error during stop_recording: {e}")
+                await ctx.send(f"Error during stop_recording: {e}")
         else:
             print("The bot is not recording.")
             await ctx.send("The bot is not recording.")
@@ -109,8 +121,14 @@ class VoiceRecorder(commands.Cog):
             filename = f"recording_{ctx.guild.id}.wav"
         print(f"Saving audio to {filename}")
         await ctx.send(f"Saving audio to {filename}")
+        
+        # Print the current working directory to verify file location
+        print(f"Current working directory: {os.getcwd()}")
+        await ctx.send(f"Current working directory: {os.getcwd()}")
+
         self.upload_to_azure_blob(filename)
-        # os.remove(filename) # Uncomment to delete the audio file after uploading
+        # Temporarily comment out the file deletion for verification
+        # os.remove(filename)
         print(f"Audio saved and uploaded to {filename}")
         await ctx.send(f"Audio saved and uploaded to {filename}")
 
