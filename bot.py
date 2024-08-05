@@ -1,17 +1,26 @@
+import logging
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import azure.cognitiveservices.speech as speechsdk
-from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
+from azure.storage.blob import BlobServiceClient
 import os
 import wave
 import asyncio
+import json
 
-# Load environment variables
-DISCORD_BOT_TOKEN = "MTI2NjgzMDA0MzMzMDM4Mzg4Mg.GuZ_4k.l7-qXtZWkg_1hNpuf7C1s-HebwG1XF-qTfcfDY"
-AZURE_STORAGE_CONNECTION_STRING = "DefaultEndpointsProtocol=https;AccountName=bardbrain;AccountKey=NXu2E8NN1VyWglGWGoYslmu8WcXWBUPJkc14Ve5pIyEwwhMJLQstZhWniDQ49fzViB疷驸琉Ϡ኷蚍Є==;EndpointSuffix=core.windows.net"
-AZURE_STORAGE_CONTAINER_NAME = "bardbrain"
-AZURE_SPEECH_KEY = "c224956600314e278141c17783ba6f97"
-AZURE_SPEECH_REGION = "uswest"
+# Load configuration from config.json
+def load_config():
+    with open('config.json') as config_file:
+        config = json.load(config_file)
+    return config
+
+config = load_config()
+
+DISCORD_BOT_TOKEN = config["DISCORD_BOT_TOKEN"]
+AZURE_STORAGE_CONNECTION_STRING = config["AZURE_STORAGE_CONNECTION_STRING"]
+AZURE_STORAGE_CONTAINER_NAME = config["AZURE_STORAGE_CONTAINER_NAME"]
+AZURE_SPEECH_KEY = config["AZURE_SPEECH_KEY"]
+AZURE_SPEECH_REGION = config["AZURE_SPEECH_REGION"]
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -55,11 +64,11 @@ class VoiceRecorder(commands.Cog):
         if self.recording:
             self.recording = False
             await ctx.send("Stopped recording.")
-            self.save_audio(ctx)
+            await self.save_audio(ctx)
         else:
             await ctx.send("The bot is not recording.")
 
-    def save_audio(self, ctx):
+    async def save_audio(self, ctx):
         filename = f"recording_{ctx.guild.id}.wav"
         with wave.open(filename, 'wb') as wf:
             wf.setnchannels(1)
@@ -96,8 +105,10 @@ class VoiceRecorder(commands.Cog):
             print(f"Speech recognition failed: {result.reason}")
 
     async def send_transcription(self, filename, transcription):
-        channel = self.bot.get_channel(int(filename.split('_')[1].split('.')[0]))
-        await channel.send(f"Transcription for {filename}: {transcription}")
+        channel_id = int(filename.split('_')[1].split('.')[0])
+        channel = self.bot.get_channel(channel_id)
+        if channel:
+            await channel.send(f"Transcription for {filename}: {transcription}")
 
 @bot.event
 async def on_ready():
@@ -107,6 +118,8 @@ async def on_ready():
 async def setup_hook():
     await bot.add_cog(VoiceRecorder(bot))
 
-loop = asyncio.get_event_loop()
-loop.create_task(setup_hook())
-bot.run(DISCORD_BOT_TOKEN)
+# Main entry point for running locally
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.create_task(setup_hook())
+    loop.run_until_complete(bot.start(DISCORD_BOT_TOKEN))
