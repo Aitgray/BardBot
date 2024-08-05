@@ -24,6 +24,8 @@ AZURE_SPEECH_REGION = config["AZURE_SPEECH_REGION"]
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True  # Enable voice state intents
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 class VoiceRecorder(commands.Cog):
@@ -35,10 +37,19 @@ class VoiceRecorder(commands.Cog):
 
     @commands.command()
     async def join(self, ctx):
+        print("Join command invoked")
+        await ctx.send("Join command invoked")
         if ctx.author.voice:
-            self.voice_client = await ctx.author.voice.channel.connect()
-            await ctx.send("Connected to the voice channel.")
+            print(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
+            await ctx.send(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
+            try:
+                self.voice_client = await ctx.author.voice.channel.connect()
+                await ctx.send("Connected to the voice channel.")
+            except Exception as e:
+                print(f"Failed to connect to the voice channel: {e}")
+                await ctx.send(f"Failed to connect to the voice channel: {e}")
         else:
+            print("Author is not in a voice channel")
             await ctx.send("You are not in a voice channel.")
 
     @commands.command()
@@ -91,8 +102,7 @@ class VoiceRecorder(commands.Cog):
         self.transcribe_audio(filename)
 
     def transcribe_audio(self, filename):
-        blob_url = f"https://{AZURE_STORAGE_CONNECTION_STRING.split(';')[2].split('=')[1]}.blob.core.windows.net/{AZURE_STORAGE_CONTAINER_NAME}/{filename}"
-        
+        print(f"Transcribing {filename}")
         speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
         audio_config = speechsdk.AudioConfig(filename=filename)
         recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
@@ -103,6 +113,9 @@ class VoiceRecorder(commands.Cog):
             self.bot.loop.create_task(self.send_transcription(filename, result.text))
         else:
             print(f"Speech recognition failed: {result.reason}")
+            if result.reason == speechsdk.ResultReason.Canceled:
+                cancellation_details = result.cancellation_details
+                print(f"CancellationDetails: Reason={cancellation_details.reason}, ErrorDetails={cancellation_details.error_details}")
 
     async def send_transcription(self, filename, transcription):
         channel_id = int(filename.split('_')[1].split('.')[0])
@@ -115,11 +128,11 @@ async def on_ready():
     print(f'Logged in as {bot.user.name}')
     print('------')
 
-async def setup_hook():
-    await bot.add_cog(VoiceRecorder(bot))
+async def main():
+    async with bot:
+        await bot.add_cog(VoiceRecorder(bot))
+        await bot.start(DISCORD_BOT_TOKEN)
 
 # Main entry point for running locally
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(setup_hook())
-    loop.run_until_complete(bot.start(DISCORD_BOT_TOKEN))
+    asyncio.run(main())
