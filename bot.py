@@ -7,6 +7,7 @@ import os
 import wave
 import asyncio
 import json
+import subprocess
 
 # Load configuration from config.json
 def load_config():
@@ -34,6 +35,7 @@ class VoiceRecorder(commands.Cog):
         self.recording = False
         self.voice_client = None
         self.audio_frames = []
+        self.process = None
 
     @commands.command()
     async def join(self, ctx):
@@ -44,6 +46,7 @@ class VoiceRecorder(commands.Cog):
             await ctx.send(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
             try:
                 self.voice_client = await ctx.author.voice.channel.connect()
+                print("Connected to the voice channel.")
                 await ctx.send("Connected to the voice channel.")
             except Exception as e:
                 print(f"Failed to connect to the voice channel: {e}")
@@ -54,43 +57,65 @@ class VoiceRecorder(commands.Cog):
 
     @commands.command()
     async def leave(self, ctx):
+        print("Leave command invoked")
+        await ctx.send("Leave command invoked")
         if self.voice_client:
             await self.voice_client.disconnect()
             self.voice_client = None
+            print("Disconnected from the voice channel.")
             await ctx.send("Disconnected from the voice channel.")
         else:
+            print("Not connected to any voice channel.")
             await ctx.send("Not connected to any voice channel.")
 
     @commands.command()
     async def start_recording(self, ctx):
+        print("Start recording command invoked")
+        await ctx.send("Start recording command invoked")
         if self.voice_client and not self.recording:
             self.recording = True
             self.audio_frames = []
+            ffmpeg_cmd = [
+                'ffmpeg', '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', '-',
+                f'recording_{ctx.guild.id}.wav'
+            ]
+            self.process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+            self.voice_client.listen(discord.FFmpegPCMAudio('-', pipe=self.process.stdin))
+            print("Started recording.")
             await ctx.send("Started recording.")
         else:
+            print("Bot is not connected to a voice channel or already recording.")
             await ctx.send("Bot is not connected to a voice channel or already recording.")
 
     @commands.command()
     async def stop_recording(self, ctx):
+        print("Stop recording command invoked")
+        await ctx.send("Stop recording command invoked")
         if self.recording:
             self.recording = False
+            if self.process:
+                self.process.stdin.close()
+                self.process.wait()
+                self.process = None
+            print("Stopped recording.")
             await ctx.send("Stopped recording.")
             await self.save_audio(ctx)
         else:
+            print("The bot is not recording.")
             await ctx.send("The bot is not recording.")
 
-    async def save_audio(self, ctx):
-        filename = f"recording_{ctx.guild.id}.wav"
-        with wave.open(filename, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(16000)
-            wf.writeframes(b''.join(self.audio_frames))
-        
+    async def save_audio(self, ctx, filename=None):
+        if filename is None:
+            filename = f"recording_{ctx.guild.id}.wav"
+        print(f"Saving audio to {filename}")
+        await ctx.send(f"Saving audio to {filename}")
         self.upload_to_azure_blob(filename)
-        os.remove(filename)
+        # os.remove(filename) # Uncomment to delete the audio file after uploading
+        print(f"Audio saved and uploaded to {filename}")
+        await ctx.send(f"Audio saved and uploaded to {filename}")
 
     def upload_to_azure_blob(self, filename):
+        print(f"Uploading {filename} to Azure Blob Storage")
         blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
         container_client = blob_service_client.get_container_client(AZURE_STORAGE_CONTAINER_NAME)
         blob_client = container_client.get_blob_client(filename)
@@ -102,7 +127,7 @@ class VoiceRecorder(commands.Cog):
         self.transcribe_audio(filename)
 
     def transcribe_audio(self, filename):
-        print(f"Transcribing {filename}")
+        print(f"Transcribing audio from {filename}")
         speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
         audio_config = speechsdk.AudioConfig(filename=filename)
         recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
@@ -110,6 +135,7 @@ class VoiceRecorder(commands.Cog):
         result = recognizer.recognize_once()
 
         if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+            print(f"Transcription recognized: {result.text}")
             self.bot.loop.create_task(self.send_transcription(filename, result.text))
         else:
             print(f"Speech recognition failed: {result.reason}")
@@ -118,10 +144,14 @@ class VoiceRecorder(commands.Cog):
                 print(f"CancellationDetails: Reason={cancellation_details.reason}, ErrorDetails={cancellation_details.error_details}")
 
     async def send_transcription(self, filename, transcription):
+        print(f"Sending transcription for {filename}")
         channel_id = int(filename.split('_')[1].split('.')[0])
         channel = self.bot.get_channel(channel_id)
         if channel:
             await channel.send(f"Transcription for {filename}: {transcription}")
+            print(f"Transcription sent for {filename}: {transcription}")
+        else:
+            print(f"Failed to find channel for transcription: {channel_id}")
 
 @bot.event
 async def on_ready():
