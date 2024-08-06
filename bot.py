@@ -8,6 +8,7 @@ import wave
 import asyncio
 import json
 import subprocess
+import shlex
 
 # Load configuration from config.json
 def load_config():
@@ -22,6 +23,7 @@ AZURE_STORAGE_CONNECTION_STRING = config["AZURE_STORAGE_CONNECTION_STRING"]
 AZURE_STORAGE_CONTAINER_NAME = config["AZURE_STORAGE_CONTAINER_NAME"]
 AZURE_SPEECH_KEY = config["AZURE_SPEECH_KEY"]
 AZURE_SPEECH_REGION = config["AZURE_SPEECH_REGION"]
+FFMPEG_PATH = config["FFMPEG_PATH"]
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -74,22 +76,24 @@ class VoiceRecorder(commands.Cog):
         if self.voice_client and not self.recording:
             try:
                 self.recording = True
-                # Explicit path to ffmpeg
-                ffmpeg_path = 'C:\\Users\\aidan\\ffmpeg\\ffmpeg-master-latest-win64-gpl\\bin\\ffmpeg.exe'  # Replace with your ffmpeg path
+                ffmpeg_path = FFMPEG_PATH
                 if not os.path.isfile(ffmpeg_path):
                     raise FileNotFoundError(f"ffmpeg not found at {ffmpeg_path}")
-                ffmpeg_cmd = [
-                    ffmpeg_path, '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', '-',
-                    f'recording_{ctx.guild.id}.wav'
-                ]
-                print(f"Running ffmpeg command: {' '.join(ffmpeg_cmd)}")
-                self.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, shell=True)
+
+                filename = f'recording_{ctx.guild.id}.wav'
+                ffmpeg_cmd = f"{ffmpeg_path} -f s16le -ar 48000 -ac 2 -i - {filename}"
+                print(f"Running ffmpeg command: {ffmpeg_cmd}")
+                
+                self.ffmpeg_process = subprocess.Popen(
+                    shlex.split(ffmpeg_cmd),
+                    stdin=subprocess.PIPE,
+                    shell=True
+                )
                 print("FFmpeg subprocess started.")
-                
-                # Use a RawPCMAudio to send raw PCM data to ffmpeg
-                audio_source = discord.PCMAudio(ffmpeg_path, pipe=True)
-                self.voice_client.play(audio_source)
-                
+
+                audio_source = discord.PCMAudio(self.ffmpeg_process.stdin)
+                self.voice_client.play(audio_source, after=lambda e: print(f"Player error: {e}") if e else None)
+
                 print("Started recording.")
                 await ctx.send("Started recording.")
             except Exception as e:
