@@ -8,7 +8,9 @@ import wave
 import asyncio
 import json
 import subprocess
-import shlex
+import pyaudio
+import threading
+import time
 
 # Load configuration from config.json
 def load_config():
@@ -37,6 +39,9 @@ class VoiceRecorder(commands.Cog):
         self.recording = False
         self.voice_client = None
         self.ffmpeg_process = None
+        self.audio_thread = None
+        self.audio = pyaudio.PyAudio()
+        self.stream = None
 
     @commands.command()
     async def join(self, ctx):
@@ -80,20 +85,27 @@ class VoiceRecorder(commands.Cog):
                 if not os.path.isfile(ffmpeg_path):
                     raise FileNotFoundError(f"ffmpeg not found at {ffmpeg_path}")
 
-                filename = f'recording_{ctx.guild.id}.wav'
-                ffmpeg_cmd = f"{ffmpeg_path} -f s16le -ar 48000 -ac 2 -i - {filename}"
-                print(f"Running ffmpeg command: {ffmpeg_cmd}")
+                timestamp = int(time.time())
+                filename = f'recording_{ctx.guild.id}_{timestamp}.wav'
+                ffmpeg_cmd = [
+                    ffmpeg_path, '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', '-', filename
+                ]
+                print(f"Running ffmpeg command: {' '.join(ffmpeg_cmd)}")
                 
                 self.ffmpeg_process = subprocess.Popen(
-                    shlex.split(ffmpeg_cmd),
-                    stdin=subprocess.PIPE,
-                    shell=True
+                    ffmpeg_cmd,
+                    stdin=subprocess.PIPE
                 )
                 print("FFmpeg subprocess started.")
 
-                audio_source = discord.PCMAudio(self.ffmpeg_process.stdin)
-                self.voice_client.play(audio_source, after=lambda e: print(f"Player error: {e}") if e else None)
+                self.stream = self.audio.open(format=pyaudio.paInt16,
+                                              channels=2,
+                                              rate=48000,
+                                              input=True,
+                                              frames_per_buffer=1024)
 
+                self.audio_thread = threading.Thread(target=self.capture_audio)
+                self.audio_thread.start()
                 print("Started recording.")
                 await ctx.send("Started recording.")
             except Exception as e:
@@ -103,6 +115,14 @@ class VoiceRecorder(commands.Cog):
             print("Bot is not connected to a voice channel or already recording.")
             await ctx.send("Bot is not connected to a voice channel or already recording.")
 
+    def capture_audio(self):
+        while self.recording:
+            try:
+                data = self.stream.read(1024)
+                self.ffmpeg_process.stdin.write(data)
+            except Exception as e:
+                print(f"Error capturing audio: {e}")
+
     @commands.command()
     async def stop_recording(self, ctx):
         print("Stop recording command invoked")
@@ -110,10 +130,15 @@ class VoiceRecorder(commands.Cog):
         if self.recording:
             try:
                 self.recording = False
+                if self.audio_thread:
+                    self.audio_thread.join()
                 if self.ffmpeg_process:
                     self.ffmpeg_process.stdin.close()
                     self.ffmpeg_process.wait()
                     self.ffmpeg_process = None
+                if self.stream:
+                    self.stream.stop_stream()
+                    self.stream.close()
                 print("Stopped recording.")
                 await ctx.send("Stopped recording.")
                 await self.save_audio(ctx)
@@ -126,7 +151,8 @@ class VoiceRecorder(commands.Cog):
 
     async def save_audio(self, ctx, filename=None):
         if filename is None:
-            filename = f"recording_{ctx.guild.id}.wav"
+            timestamp = int(time.time())
+            filename = f"recording_{ctx.guild.id}_{timestamp}.wav"
         print(f"Saving audio to {filename}")
         await ctx.send(f"Saving audio to {filename}")
         
@@ -134,7 +160,7 @@ class VoiceRecorder(commands.Cog):
         print(f"Current working directory: {os.getcwd()}")
         await ctx.send(f"Current working directory: {os.getcwd()}")
 
-        self.upload_to_azure_blob(filename)
+        # self.upload_to_azure_blob(filename)
         # Temporarily comment out the file deletion for verification
         # os.remove(filename)
         print(f"Audio saved and uploaded to {filename}")
