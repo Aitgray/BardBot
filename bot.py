@@ -34,8 +34,7 @@ class VoiceRecorder(commands.Cog):
         self.bot = bot
         self.recording = False
         self.voice_client = None
-        self.audio_frames = []
-        self.process = None
+        self.ffmpeg_process = None
 
     @commands.command()
     async def join(self, ctx):
@@ -75,18 +74,23 @@ class VoiceRecorder(commands.Cog):
         if self.voice_client and not self.recording:
             try:
                 self.recording = True
-                self.audio_frames = []
                 # Explicit path to ffmpeg
-                ffmpeg_path = 'C:\\Users\\aidan\\ffmpeg\\ffmpeg-master-latest-win64-gpl\\ffmpeg.exe'  # Replace with your ffmpeg path
+                ffmpeg_path = 'C:\\Users\\aidan\\ffmpeg\\ffmpeg-master-latest-win64-gpl\\bin\\ffmpeg.exe'  # Replace with your ffmpeg path
+                if not os.path.isfile(ffmpeg_path):
+                    raise FileNotFoundError(f"ffmpeg not found at {ffmpeg_path}")
                 ffmpeg_cmd = [
                     ffmpeg_path, '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', '-',
                     f'recording_{ctx.guild.id}.wav'
                 ]
                 print(f"Running ffmpeg command: {' '.join(ffmpeg_cmd)}")
-                self.process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+                self.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, shell=True)
                 print("FFmpeg subprocess started.")
-                self.voice_client.listen(discord.FFmpegPCMAudio('-', pipe=self.process.stdin))
-                print("Started listening to voice client.")
+                
+                # Use a RawPCMAudio to send raw PCM data to ffmpeg
+                audio_source = discord.PCMAudio(ffmpeg_path, pipe=True)
+                self.voice_client.play(audio_source)
+                
+                print("Started recording.")
                 await ctx.send("Started recording.")
             except Exception as e:
                 print(f"Error during start_recording: {e}")
@@ -102,10 +106,10 @@ class VoiceRecorder(commands.Cog):
         if self.recording:
             try:
                 self.recording = False
-                if self.process:
-                    self.process.stdin.close()
-                    self.process.wait()
-                    self.process = None
+                if self.ffmpeg_process:
+                    self.ffmpeg_process.stdin.close()
+                    self.ffmpeg_process.wait()
+                    self.ffmpeg_process = None
                 print("Stopped recording.")
                 await ctx.send("Stopped recording.")
                 await self.save_audio(ctx)
