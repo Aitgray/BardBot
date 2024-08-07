@@ -1,15 +1,12 @@
 import logging
 import discord
-from discord.ext import commands
+from discord.ext import commands, voice_recv
 import azure.cognitiveservices.speech as speechsdk
 from azure.storage.blob import BlobServiceClient
 import os
 import wave
 import asyncio
 import json
-import subprocess
-import pyaudio
-import threading
 import time
 
 # Load configuration from config.json
@@ -25,7 +22,6 @@ AZURE_STORAGE_CONNECTION_STRING = config["AZURE_STORAGE_CONNECTION_STRING"]
 AZURE_STORAGE_CONTAINER_NAME = config["AZURE_STORAGE_CONTAINER_NAME"]
 AZURE_SPEECH_KEY = config["AZURE_SPEECH_KEY"]
 AZURE_SPEECH_REGION = config["AZURE_SPEECH_REGION"]
-FFMPEG_PATH = config["FFMPEG_PATH"]
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -38,10 +34,10 @@ class VoiceRecorder(commands.Cog):
         self.bot = bot
         self.recording = False
         self.voice_client = None
-        self.ffmpeg_process = None
-        self.audio_thread = None
-        self.audio = pyaudio.PyAudio()
-        self.stream = None
+        self.audio_data = {}
+        self.channels = 2  # Number of audio channels (Discord typically uses stereo audio)
+        self.sample_width = 2  # Number of bytes per sample (16-bit audio)
+        self.frame_rate = 48000  # Sample rate (48 kHz)
 
     @commands.command()
     async def join(self, ctx):
@@ -51,7 +47,8 @@ class VoiceRecorder(commands.Cog):
             print(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
             await ctx.send(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
             try:
-                self.voice_client = await ctx.author.voice.channel.connect()
+                self.voice_client = await ctx.author.voice.channel.connect(cls=voice_recv.VoiceRecvClient)
+                self.voice_client.listen(voice_recv.BasicSink(self.callback))
                 print("Connected to the voice channel.")
                 await ctx.send("Connected to the voice channel.")
             except Exception as e:
@@ -78,93 +75,38 @@ class VoiceRecorder(commands.Cog):
     async def start_recording(self, ctx):
         print("Start recording command invoked")
         await ctx.send("Start recording command invoked")
-        if self.voice_client and not self.recording:
-            try:
-                self.recording = True
-                ffmpeg_path = FFMPEG_PATH
-                if not os.path.isfile(ffmpeg_path):
-                    raise FileNotFoundError(f"ffmpeg not found at {ffmpeg_path}")
-
-                timestamp = int(time.time())
-                filename = f'recording_{ctx.guild.id}_{timestamp}.wav'
-                ffmpeg_cmd = [
-                    ffmpeg_path, '-f', 's16le', '-ar', '48000', '-ac', '2', '-i', '-', filename
-                ]
-                print(f"Running ffmpeg command: {' '.join(ffmpeg_cmd)}")
-                
-                self.ffmpeg_process = subprocess.Popen(
-                    ffmpeg_cmd,
-                    stdin=subprocess.PIPE
-                )
-                print("FFmpeg subprocess started.")
-
-                self.stream = self.audio.open(format=pyaudio.paInt16,
-                                              channels=2,
-                                              rate=48000,
-                                              input=True,
-                                              frames_per_buffer=1024)
-
-                self.audio_thread = threading.Thread(target=self.capture_audio)
-                self.audio_thread.start()
-                print("Started recording.")
-                await ctx.send("Started recording.")
-            except Exception as e:
-                print(f"Error during start_recording: {e}")
-                await ctx.send(f"Error during start_recording: {e}")
-        else:
-            print("Bot is not connected to a voice channel or already recording.")
-            await ctx.send("Bot is not connected to a voice channel or already recording.")
-
-    def capture_audio(self):
-        while self.recording:
-            try:
-                data = self.stream.read(1024)
-                self.ffmpeg_process.stdin.write(data)
-            except Exception as e:
-                print(f"Error capturing audio: {e}")
+        self.recording = True
+        self.audio_data = {}
+        await ctx.send("Started recording")
 
     @commands.command()
     async def stop_recording(self, ctx):
         print("Stop recording command invoked")
         await ctx.send("Stop recording command invoked")
+        self.recording = False
+        await ctx.send("Stopped recording")
+        await self.save_audio(ctx)
+
+    def callback(self, user, data: voice_recv.VoiceData):
         if self.recording:
-            try:
-                self.recording = False
-                if self.audio_thread:
-                    self.audio_thread.join()
-                if self.ffmpeg_process:
-                    self.ffmpeg_process.stdin.close()
-                    self.ffmpeg_process.wait()
-                    self.ffmpeg_process = None
-                if self.stream:
-                    self.stream.stop_stream()
-                    self.stream.close()
-                print("Stopped recording.")
-                await ctx.send("Stopped recording.")
-                await self.save_audio(ctx)
-            except Exception as e:
-                print(f"Error during stop_recording: {e}")
-                await ctx.send(f"Error during stop_recording: {e}")
-        else:
-            print("The bot is not recording.")
-            await ctx.send("The bot is not recording.")
+            if user.id not in self.audio_data:
+                self.audio_data[user.id] = []
+            self.audio_data[user.id].append(data.pcm)
 
-    async def save_audio(self, ctx, filename=None):
-        if filename is None:
+    async def save_audio(self, ctx):
+        for user_id, audio_chunks in self.audio_data.items():
             timestamp = int(time.time())
-            filename = f"recording_{ctx.guild.id}_{timestamp}.wav"
-        print(f"Saving audio to {filename}")
-        await ctx.send(f"Saving audio to {filename}")
-        
-        # Print the current working directory to verify file location
-        print(f"Current working directory: {os.getcwd()}")
-        await ctx.send(f"Current working directory: {os.getcwd()}")
+            filename = f'recording_{ctx.guild.id}_{user_id}_{timestamp}.wav'
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(self.sample_width)
+                wf.setframerate(self.frame_rate)
+                wf.writeframes(b''.join(audio_chunks))
+            await ctx.send(f"Saved audio for user {user_id} to {filename}")
 
-        # self.upload_to_azure_blob(filename)
-        # Temporarily comment out the file deletion for verification
-        # os.remove(filename)
-        print(f"Audio saved and uploaded to {filename}")
-        await ctx.send(f"Audio saved and uploaded to {filename}")
+            # Optionally upload to Azure Blob Storage and transcribe
+            # self.upload_to_azure_blob(filename)
+            # self.transcribe_audio(filename)
 
     def upload_to_azure_blob(self, filename):
         print(f"Uploading {filename} to Azure Blob Storage")
@@ -175,8 +117,7 @@ class VoiceRecorder(commands.Cog):
         with open(filename, "rb") as data:
             blob_client.upload_blob(data)
 
-        # Trigger transcription after upload
-        self.transcribe_audio(filename)
+        print(f"Audio uploaded to {filename}")
 
     def transcribe_audio(self, filename):
         print(f"Transcribing audio from {filename}")
@@ -205,6 +146,11 @@ class VoiceRecorder(commands.Cog):
         else:
             print(f"Failed to find channel for transcription: {channel_id}")
 
+    @commands.command()
+    async def stop(self, ctx): # Shutdown the bot
+        await ctx.send("Shutting down the bot.")
+        await self.bot.close()
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
@@ -215,6 +161,5 @@ async def main():
         await bot.add_cog(VoiceRecorder(bot))
         await bot.start(DISCORD_BOT_TOKEN)
 
-# Main entry point for running locally
 if __name__ == "__main__":
     asyncio.run(main())
