@@ -8,6 +8,7 @@ import wave
 import asyncio
 import json
 import time
+from pydub import AudioSegment
 
 # Load configuration from config.json
 def load_config():
@@ -38,6 +39,14 @@ class VoiceRecorder(commands.Cog):
         self.channels = 2  # Number of audio channels (Discord typically uses stereo audio)
         self.sample_width = 2  # Number of bytes per sample (16-bit audio)
         self.frame_rate = 48000  # Sample rate (48 kHz)
+
+    def compress_audio(self, filename):
+        print(f"Compressing {filename}")
+        audio = AudioSegment.from_wav(filename)
+        compressed_filename = filename.replace('.wav', '.mp3')
+        audio.export(compressed_filename, format="mp3")
+        print(f"Compressed {filename} to {compressed_filename}")
+        return compressed_filename
 
     @commands.command()
     async def join(self, ctx):
@@ -95,18 +104,21 @@ class VoiceRecorder(commands.Cog):
 
     async def save_audio(self, ctx):
         for user_id, audio_chunks in self.audio_data.items():
-            timestamp = int(time.time())
-            filename = f'recording_{ctx.guild.id}_{user_id}_{timestamp}.wav'
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            filename = f'{timestamp}.wav'
             with wave.open(filename, 'wb') as wf:
                 wf.setnchannels(self.channels)
                 wf.setsampwidth(self.sample_width)
                 wf.setframerate(self.frame_rate)
                 wf.writeframes(b''.join(audio_chunks))
-            await ctx.send(f"Saved audio for user {user_id} to {filename}")
+            await ctx.send(f"Saved audio to {filename}")
 
-            # Optionally upload to Azure Blob Storage and transcribe
-            # self.upload_to_azure_blob(filename)
-            # self.transcribe_audio(filename)
+            # Compress audio and update filename for further processing
+            compressed_filename = self.compress_audio(filename)
+
+            # Upload the compressed audio to Azure Blob Storage and transcribe
+            self.upload_to_azure_blob(compressed_filename)
+            self.transcribe_audio(compressed_filename, timestamp)
 
     def upload_to_azure_blob(self, filename):
         print(f"Uploading {filename} to Azure Blob Storage")
@@ -119,7 +131,7 @@ class VoiceRecorder(commands.Cog):
 
         print(f"Audio uploaded to {filename}")
 
-    def transcribe_audio(self, filename):
+    def transcribe_audio(self, filename, timestamp):
         print(f"Transcribing audio from {filename}")
         speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
         audio_config = speechsdk.AudioConfig(filename=filename)
@@ -128,8 +140,10 @@ class VoiceRecorder(commands.Cog):
         result = recognizer.recognize_once()
 
         if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            print(f"Transcription recognized: {result.text}")
-            self.bot.loop.create_task(self.send_transcription(filename, result.text))
+            transcription = result.text
+            print(f"Transcription recognized: {transcription}")
+            self.bot.loop.create_task(self.send_transcription(filename, transcription))
+            self.save_transcription(filename, transcription, timestamp)
         else:
             print(f"Speech recognition failed: {result.reason}")
             if result.reason == speechsdk.ResultReason.Canceled:
@@ -145,6 +159,12 @@ class VoiceRecorder(commands.Cog):
             print(f"Transcription sent for {filename}: {transcription}")
         else:
             print(f"Failed to find channel for transcription: {channel_id}")
+
+    def save_transcription(self, filename, transcription, timestamp):
+        transcription_filename = filename.replace('.mp3', '.txt')
+        with open(transcription_filename, 'w') as f:
+            f.write(f"Timestamp: {timestamp}\n\n{transcription}")
+        print(f"Saved transcription to {transcription_filename}")
 
     @commands.command()
     async def stop(self, ctx): # Shutdown the bot
