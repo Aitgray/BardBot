@@ -1,28 +1,20 @@
 import logging
 import discord
 from discord.ext import commands, voice_recv
-import azure.cognitiveservices.speech as speechsdk
-from azure.storage.blob import BlobServiceClient
 import os
 import wave
 import asyncio
 import json
 import time
-from pydub import AudioSegment
 
 # Load configuration from config.json
 def load_config():
-    with open('config.json') as config_file:
-        config = json.load(config_file)
-    return config
+    with open('config.json', 'r') as f:
+        return json.load(f)
 
 config = load_config()
 
 DISCORD_BOT_TOKEN = config["DISCORD_BOT_TOKEN"]
-AZURE_STORAGE_CONNECTION_STRING = config["AZURE_STORAGE_CONNECTION_STRING"]
-AZURE_STORAGE_CONTAINER_NAME = config["AZURE_STORAGE_CONTAINER_NAME"]
-AZURE_SPEECH_KEY = config["AZURE_SPEECH_KEY"]
-AZURE_SPEECH_REGION = config["AZURE_SPEECH_REGION"]
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -39,14 +31,6 @@ class VoiceRecorder(commands.Cog):
         self.channels = 2  # Number of audio channels (Discord typically uses stereo audio)
         self.sample_width = 2  # Number of bytes per sample (16-bit audio)
         self.frame_rate = 48000  # Sample rate (48 kHz)
-
-    def compress_audio(self, filename):
-        print(f"Compressing {filename}")
-        audio = AudioSegment.from_wav(filename)
-        compressed_filename = filename.replace('.wav', '.mp3')
-        audio.export(compressed_filename, format="mp3")
-        print(f"Compressed {filename} to {compressed_filename}")
-        return compressed_filename
 
     @commands.command()
     async def join(self, ctx):
@@ -105,66 +89,13 @@ class VoiceRecorder(commands.Cog):
     async def save_audio(self, ctx):
         for user_id, audio_chunks in self.audio_data.items():
             timestamp = time.strftime("%Y%m%d-%H%M%S")
-            filename = f'{timestamp}.wav'
+            filename = f'{timestamp}_{user_id}.wav'
             with wave.open(filename, 'wb') as wf:
                 wf.setnchannels(self.channels)
                 wf.setsampwidth(self.sample_width)
                 wf.setframerate(self.frame_rate)
                 wf.writeframes(b''.join(audio_chunks))
             await ctx.send(f"Saved audio to {filename}")
-
-            # Compress audio and update filename for further processing
-            compressed_filename = self.compress_audio(filename)
-
-            # Upload the compressed audio to Azure Blob Storage and transcribe
-            self.upload_to_azure_blob(compressed_filename)
-            self.transcribe_audio(compressed_filename, timestamp)
-
-    def upload_to_azure_blob(self, filename):
-        print(f"Uploading {filename} to Azure Blob Storage")
-        blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
-        container_client = blob_service_client.get_container_client(AZURE_STORAGE_CONTAINER_NAME)
-        blob_client = container_client.get_blob_client(filename)
-
-        with open(filename, "rb") as data:
-            blob_client.upload_blob(data)
-
-        print(f"Audio uploaded to {filename}")
-
-    def transcribe_audio(self, filename, timestamp):
-        print(f"Transcribing audio from {filename}")
-        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
-        audio_config = speechsdk.AudioConfig(filename=filename)
-        recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
-
-        result = recognizer.recognize_once()
-
-        if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            transcription = result.text
-            print(f"Transcription recognized: {transcription}")
-            self.bot.loop.create_task(self.send_transcription(filename, transcription))
-            self.save_transcription(filename, transcription, timestamp)
-        else:
-            print(f"Speech recognition failed: {result.reason}")
-            if result.reason == speechsdk.ResultReason.Canceled:
-                cancellation_details = result.cancellation_details
-                print(f"CancellationDetails: Reason={cancellation_details.reason}, ErrorDetails={cancellation_details.error_details}")
-
-    async def send_transcription(self, filename, transcription):
-        print(f"Sending transcription for {filename}")
-        channel_id = int(filename.split('_')[1].split('.')[0])
-        channel = self.bot.get_channel(channel_id)
-        if channel:
-            await channel.send(f"Transcription for {filename}: {transcription}")
-            print(f"Transcription sent for {filename}: {transcription}")
-        else:
-            print(f"Failed to find channel for transcription: {channel_id}")
-
-    def save_transcription(self, filename, transcription, timestamp):
-        transcription_filename = filename.replace('.mp3', '.txt')
-        with open(transcription_filename, 'w') as f:
-            f.write(f"Timestamp: {timestamp}\n\n{transcription}")
-        print(f"Saved transcription to {transcription_filename}")
 
     @commands.command()
     async def stop(self, ctx): # Shutdown the bot
