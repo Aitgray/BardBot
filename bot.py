@@ -31,6 +31,7 @@ class VoiceRecorder(commands.Cog):
         self.channels = 2  # Number of audio channels (Discord typically uses stereo audio)
         self.sample_width = 2  # Number of bytes per sample (16-bit audio)
         self.frame_rate = 48000  # Sample rate (48 kHz)
+        self.recording_task = None
 
     @commands.command()
     async def join(self, ctx):
@@ -70,6 +71,9 @@ class VoiceRecorder(commands.Cog):
         await ctx.send("Start recording command invoked")
         self.recording = True
         self.audio_data = {}
+
+        # Start a task to reset recording every 10 minutes
+        self.recording_task = asyncio.create_task(self.reset_recording_periodically(ctx))
         await ctx.send("Started recording")
 
     @commands.command()
@@ -77,8 +81,20 @@ class VoiceRecorder(commands.Cog):
         print("Stop recording command invoked")
         await ctx.send("Stop recording command invoked")
         self.recording = False
-        await ctx.send("Stopped recording")
+        if self.recording_task:
+            self.recording_task.cancel()  # Cancel the periodic reset task
         await self.save_audio(ctx)
+        await ctx.send("Stopped recording")
+
+    async def reset_recording_periodically(self, ctx):
+        try:
+            while self.recording:
+                await asyncio.sleep(600)  # 10 minutes
+                await self.save_audio(ctx)
+                self.audio_data = {}  # Reset audio data for the next recording period
+                await ctx.send("Recording period reset. Continuing recording...")
+        except asyncio.CancelledError:
+            pass
 
     def callback(self, user, data: voice_recv.VoiceData):
         if self.recording:
@@ -98,7 +114,7 @@ class VoiceRecorder(commands.Cog):
             await ctx.send(f"Saved audio to {filename}")
 
     @commands.command()
-    async def stop(self, ctx): # Shutdown the bot
+    async def stop(self, ctx):  # Shutdown the bot
         await ctx.send("Shutting down the bot.")
         await self.bot.close()
 
