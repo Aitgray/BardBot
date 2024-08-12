@@ -1,9 +1,9 @@
-import azure.cognitiveservices.speech as speechsdk
 import json
 import os
 import time
 import requests
 from azure.storage.blob import BlobServiceClient
+import argparse
 
 def load_config():
     if not os.path.exists('config.json'):
@@ -26,33 +26,72 @@ OPENAI_API_KEY = config['OPENAI_API_KEY']
 AZURE_STORAGE_CONNECTION_STRING = config['AZURE_STORAGE_CONNECTION_STRING']
 AZURE_STORAGE_CONTAINER_NAME = config['AZURE_STORAGE_CONTAINER_NAME']
 
-def transcribe_audio(filename, timestamp):
-    print(f"Transcribing audio from {filename}")
-    speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
-    audio_config = speechsdk.AudioConfig(filename=filename)
-    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+def submit_batch_transcription_job(blob_url, job_name):
+    url = f"https://{AZURE_SPEECH_REGION}.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions"
 
-    result = recognizer.recognize_once()
+    headers = {
+        "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
+        "Content-Type": "application/json"
+    }
 
-    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-        transcription = result.text
-        print(f"Transcription recognized: {transcription}")
-        save_transcription(filename, transcription, timestamp)
+    body = {
+        "displayName": job_name,
+        "description": "Batch transcription for audio files",
+        "locale": "en-US",
+        "contentUrls": [blob_url],
+        "properties": {
+            "wordLevelTimestampsEnabled": False,
+            "diarizationEnabled": False,
+            "punctuationMode": "DictatedAndAutomatic"
+        }
+    }
+
+    response = requests.post(url, headers=headers, json=body)
+
+    if response.status_code == 202:
+        print(f"Batch transcription job '{job_name}' submitted successfully.")
+        job_location = response.headers['location']
+        return job_location
     else:
-        print(f"Speech recognition failed: {result.reason}")
-        if result.reason == speechsdk.ResultReason.Canceled:
-            cancellation_details = result.cancellation_details
-            print(f"CancellationDetails: Reason={cancellation_details.reason}, ErrorDetails={cancellation_details.error_details}")
+        print(f"Failed to submit batch transcription job: {response.status_code}")
+        print(response.json())
+        return None
 
-def save_transcription(filename, transcription, timestamp):
-    transcription_filename = filename.replace('.wav', '.txt')
-    user_id = filename.split('_')[-1].split('.')[0]
-    with open(transcription_filename, 'w') as f:
-        f.write(f"User ID: {user_id}\nTimestamp: {timestamp}\n\n{transcription}")
-    print(f"Saved transcription to {transcription_filename}")
+def poll_transcription_job(job_location):
+    headers = {
+        "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY
+    }
+
+    while True:
+        response = requests.get(job_location, headers=headers)
+
+        if response.status_code == 200:
+            job_status = response.json()['status']
+            if job_status in ['Succeeded', 'Failed']:
+                print(f"Job finished with status: {job_status}")
+                return response.json()
+            else:
+                print(f"Job status: {job_status}. Polling again in 30 seconds...")
+                time.sleep(30)
+        else:
+            print(f"Failed to poll job status: {response.status_code}")
+            print(response.json())
+            return None
+
+def upload_to_azure_storage(filename):
+    print(f"Uploading {filename} to Azure Blob Storage")
+    blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
+    container_client = blob_service_client.get_container_client(AZURE_STORAGE_CONTAINER_NAME)
+    blob_client = container_client.get_blob_client(filename)
+
+    with open(f"recordings/{filename}", "rb") as data:
+        blob_client.upload_blob(data)
+
+    print(f"Audio uploaded to Azure Storage as {filename}")
+    return blob_client.url
 
 def stitch_transcriptions():
-    transcriptions = [f for f in os.listdir() if f.endswith('.txt')]
+    transcriptions = [f for f in os.listdir("transcripts") if f.endswith('.txt')]
     if not transcriptions:
         print("No transcriptions found.")
         return
@@ -116,48 +155,51 @@ def summarize_transcriptions(transcriptions_text):
         print(response.text)
         return None
 
-def upload_to_azure_storage(filename):
-    print(f"Uploading {filename} to Azure Blob Storage")
-    blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
-    container_client = blob_service_client.get_container_client(AZURE_STORAGE_CONTAINER_NAME)
-    blob_client = container_client.get_blob_client(filename)
-
-    with open(f"recordings/{filename}", "rb") as data:
-        blob_client.upload_blob(data)
-
-    print(f"Audio uploaded to Azure Storage as {filename}")
-
-def main():
-    audio_files = [f for f in os.listdir("recordings") if f.endswith('.wav')]
-    if not audio_files:
-        print("No audio files found.")
-        return
-    
-    for audio_file in audio_files:
-        if os.path.exists(f"transcripts/{audio_file.replace('.wav', '.txt')}"):
-            audio_files.remove(audio_file)
-
-    if not audio_files:
-        print("All audio files already have transcriptions.")
-        return
-    else:
-        print("Uploading audio files to Azure Storage...")
+def main(args):
+    if args.transcribe or args.full_run:
+        audio_files = [f for f in os.listdir("recordings") if f.endswith('.wav')]
+        if not audio_files:
+            print("No audio files found.")
+            return
+        
         for audio_file in audio_files:
-            upload_to_azure_storage(audio_file)
+            if os.path.exists(f"transcripts/{audio_file.replace('.wav', '.txt')}"):
+                audio_files.remove(audio_file)
 
-    print("Audio files uploaded. Starting transcription...")
+        if not audio_files:
+            print("All audio files already have transcriptions.")
+        else:
+            print("Uploading audio files to Azure Storage...")
+            for audio_file in audio_files:
+                blob_url = upload_to_azure_storage(audio_file)
+                
+                if blob_url:
+                    job_location = submit_batch_transcription_job(blob_url, audio_file)
+                    
+                    if job_location:
+                        transcription_result = poll_transcription_job(job_location)
+                        # Process the transcription_result as needed
 
-    stitch_transcriptions()
+    if args.stitch or args.full_run:
+        stitch_transcriptions()
 
-    with open('transcripts/final_transcript.txt', 'r') as f:
-        transcriptions_text = f.read()
+    if args.summarize or args.full_run:
+        with open('transcripts/final_transcript.txt', 'r') as f:
+            transcriptions_text = f.read()
 
-    summary = summarize_transcriptions(transcriptions_text)
+        summary = summarize_transcriptions(transcriptions_text)
 
-    if summary:
-        print("Summary:", summary)
-        with open('transcripts/summary.txt', 'w') as f:
-            f.write(summary)
+        if summary:
+            print("Summary:", summary)
+            with open('transcripts/summary.txt', 'w') as f:
+                f.write(summary)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Process audio transcriptions and summarization.")
+    parser.add_argument("--transcribe", action="store_true", help="Run the transcription process only.")
+    parser.add_argument("--stitch", action="store_true", help="Run the transcription stitching process only.")
+    parser.add_argument("--summarize", action="store_true", help="Run the summarization process only.")
+    parser.add_argument("--full_run", action="store_true", help="Run the full process (transcribe, stitch, summarize).")
+    
+    args = parser.parse_args()
+    main(args)
