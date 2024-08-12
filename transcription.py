@@ -19,6 +19,7 @@ config = load_config()
 if config is None:
     raise FileNotFoundError("Config file is missing. Please ensure config.json is present.")
 
+# Load configuration from config.json
 AZURE_SPEECH_KEY = config['AZURE_SPEECH_KEY']
 AZURE_SPEECH_REGION = config['AZURE_SPEECH_REGION']
 AZURE_OPENAI_ENDPOINT = config['AZURE_OPENAI_ENDPOINT']
@@ -27,12 +28,14 @@ OPENAI_API_KEY = config['OPENAI_API_KEY']
 AZURE_STORAGE_CONNECTION_STRING = config['AZURE_STORAGE_CONNECTION_STRING']
 AZURE_STORAGE_CONTAINER_NAME = config['AZURE_STORAGE_CONTAINER_NAME']
 
+# Check if the file exists in Azure Storage
 def blob_exists(filename):
     blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
     blob_client = blob_service_client.get_blob_client(container=AZURE_STORAGE_CONTAINER_NAME, blob=filename)
     
     return blob_client.exists()
 
+# Upload the file to Azure Storage
 def upload_to_azure_storage(filename):
     blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
     container_client = blob_service_client.get_container_client(AZURE_STORAGE_CONTAINER_NAME)
@@ -60,6 +63,7 @@ def upload_to_azure_storage(filename):
     sas_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{AZURE_STORAGE_CONTAINER_NAME}/{filename}?{sas_token}"
     return sas_url
 
+# Submit a batch transcription job to Azure Speech to Text
 def submit_batch_transcription_job(blob_url, filename):
     transcription_config = {
         "displayName": filename,
@@ -98,6 +102,7 @@ def submit_batch_transcription_job(blob_url, filename):
         print(response.text)
         return None
 
+# Poll the transcription job status until it is completed
 def poll_transcription_job(job_location):
     headers = {
         "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY
@@ -124,6 +129,7 @@ def poll_transcription_job(job_location):
         print("Transcription job is still in progress. Waiting 30 seconds before polling again...")
         time.sleep(30)
 
+# Download the transcription files from Azure Speech to Text
 def download_transcription_files(files_url, original_filename, save_dir="transcripts"):
     headers = {
         "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY
@@ -161,17 +167,15 @@ def download_transcription_files(files_url, original_filename, save_dir="transcr
         print(f"Failed to download transcription files: {response.status_code}")
         print(response.text)
 
-
+# Extract the transcription text from the json file downloaded from Azure Speech to Text
 def extract_transcription_text(transcription_data):
-    """
-    Extracts the transcription text from the contenturl_0.json data.
-    """
+
     transcription_text = ""
     for segment in transcription_data["combinedRecognizedPhrases"]:
         transcription_text += segment["display"] + "\n"
     return transcription_text
 
-
+# Stitch together the transcriptions for each user (this will be depreciated in the future)
 def stitch_transcriptions():
     # List of transcriptions ending with '_contenturl_0.txt'
     transcriptions = [f for f in os.listdir("transcripts") if f.endswith('_contenturl_0.txt')]
@@ -225,6 +229,7 @@ def stitch_transcriptions():
         f.write(final_transcript)
     print("Final combined transcript saved as final_transcript.txt")
 
+# Summarize the transcriptions using OpenAI's GPT-3 (Not functional)
 def summarize_transcriptions(transcriptions_text):
     headers = {
         "Content-Type": "application/json",
@@ -233,7 +238,7 @@ def summarize_transcriptions(transcriptions_text):
     
     data = {
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": "You are a helpful assistant who summarizes the transcriptions from my DND sessions with friends."},
             {"role": "user", "content": f"Summarize the following transcriptions: {transcriptions_text}"}
         ],
         "temperature": 0.3,
