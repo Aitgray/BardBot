@@ -2,3 +2,4 @@ config.json
 # Ignore the wav files in the recordings folder as well as the text files in the transcripts folder
 recordings/*.wav
 transcripts/*.txt
+transcripts/*.json
