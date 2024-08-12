@@ -25,3 +25,5 @@ Convert the time in the file name to a (slightly) more readable format (maybe in
 
 I need to double check the --transcribe command to ensure that audio files that have been transcribed are not transcribed again. This should just be as simple as checking if the file name is in the list of files that have already been transcribed.
 
+Move the project to a new repository, this one has leaked API keys and I don't want to deal with that. Also make it public so that I can share it with the rest of the group, as well as anyone else who might be interested. Plus I need an MIT license.
+
