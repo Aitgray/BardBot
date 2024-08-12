@@ -8,7 +8,7 @@ Help, join, and leave commands, start and stop recording.
 ### transcption.py
 Transcription of audio files using Azure Speech to Text, all the results are saved to seperate files where they are then stitched together.
 
-TLDR: --transcribe and --stitch fully functional. --summarize is not functional.
+TLDR: --transcribe and --stitch fully functional. --summarize is not functional at all.
 
 ## Planned
 Fix summarize, add a command to run transcription.py from bot.py.
@@ -27,3 +27,5 @@ I need to double check the --transcribe command to ensure that audio files that 
 
 Move the project to a new repository, this one has leaked API keys and I don't want to deal with that. Also make it public so that I can share it with the rest of the group, as well as anyone else who might be interested. Plus I need an MIT license.
 
+## Evental Goal
+I would love it if the transcription worked normally instead of recording the audio from each individual user. The voice_recv library is awesome, but doesn't function the way I want it to, although I may need to delve into the code more to see if it has the functionality I want already built in. If it doesn't, I may need to create a tool to record all the audio from discord and then transcribe it all at once. This has the added issue of needing to know who is speaking, which technically can be done with the voice_recv library. Discord has a feature that allows you to see who is speaking, so I could use that to determine who is speaking at any given time. It would probably need some smoothing so back and forth conversations don't get mixed up, and background noise would be an issue, but I think it could be done.
