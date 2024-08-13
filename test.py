@@ -33,6 +33,7 @@ class VoiceRecorder(commands.Cog):
         self.sample_width = 2  # Number of bytes per sample (16-bit audio)
         self.frame_rate = 48000  # Sample rate (48 kHz)
         self.recording_task = None
+        self.silence_frame = b'\x00' * self.sample_width * self.channels * (self.frame_rate // 100)  # 10ms of silence
 
     @commands.command()
     async def join(self, ctx):
@@ -97,42 +98,58 @@ class VoiceRecorder(commands.Cog):
         except asyncio.CancelledError:
             pass
 
-    def callback(self, user, data: voice_recv.VoiceData):
-        if self.recording:
+    def callback(self, user, packet):
+        if packet is not None and packet.decrypted_data is not None:
             if user.id not in self.audio_data:
-                self.audio_data[user.id] = []
-            self.audio_data[user.id].append(data.pcm)
+                self.audio_data[user.id] = bytearray()
+
+            # Append audio data or silence
+            self.audio_data[user.id].extend(packet.decrypted_data)
+
+            # Ensure all buffers are synchronized in length
+            max_length = max(len(data) for data in self.audio_data.values())
+            for uid in self.audio_data:
+                if len(self.audio_data[uid]) < max_length:
+                    self.audio_data[uid].extend(self.silence_frame * ((max_length - len(self.audio_data[uid])) // len(self.silence_frame)))
 
     async def save_audio(self, ctx):
         timestamp = time.strftime("%m-%d-%Y_%I-%M-%S_%p")
-        filename = f'{timestamp}_recording.wav'
-        
-        # Mix audio data
-        mixed_audio = self.mix_audio_streams()
-        
-        with wave.open(filename, 'wb') as wf:
+        for user_id, audio in self.audio_data.items():
+            user = self.bot.get_user(user_id)
+            if user:
+                filename = f'recordings/{user.name}_{user_id}_{timestamp}.wav'
+                with wave.open(filename, 'wb') as wf:
+                    wf.setnchannels(self.channels)
+                    wf.setsampwidth(self.sample_width)
+                    wf.setframerate(self.frame_rate)
+                    wf.writeframes(b''.join(audio))
+                await ctx.send(f"Saved audio for {user.name} to {filename}")
+
+        # Save merged audio for transcription
+        merged_filename = f'recordings/merged_{timestamp}.txt'
+        merged_audio = self.merge_audio_streams()
+        with wave.open(merged_filename, 'wb') as wf:
             wf.setnchannels(self.channels)
             wf.setsampwidth(self.sample_width)
-            # Double the frame rate to fix pitch and speed
-            wf.setframerate(self.frame_rate * 2)
-            wf.writeframes(mixed_audio)
-        await ctx.send(f"Saved audio to {filename}")
+            wf.setframerate(self.frame_rate)
+            wf.writeframes(merged_audio)
+        await ctx.send(f"Saved merged audio to {merged_filename}")
 
-    def mix_audio_streams(self):
+    def merge_audio_streams(self):
         # Find the length of the longest audio stream
-        max_length = max(len(b''.join(data)) for data in self.audio_data.values())
+        max_length = max(len(data) for data in self.audio_data.values())
         
         # Initialize an array to hold the mixed audio
         mixed_audio = np.zeros(max_length // self.sample_width, dtype=np.int32)
         
         for user_data in self.audio_data.values():
-            user_audio = np.frombuffer(b''.join(user_data), dtype=np.int16)
+            user_audio = np.frombuffer(user_data, dtype=np.int16)
             mixed_audio[:len(user_audio)] += user_audio
         
-        # Normalize the mixed audio to prevent clipping
-        mixed_audio = np.clip(mixed_audio, -32768, 32767).astype(np.int16)
+        # Clip the values to fit in int16
+        mixed_audio = np.clip(mixed_audio, -32768, 32767)
         
-        return mixed_audio.tobytes()
+        return mixed_audio.astype(np.int16).tobytes()
 
     @commands.command()
     async def stop(self, ctx):  # Shutdown the bot

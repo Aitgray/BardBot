@@ -26,11 +26,6 @@ AZURE_SPEECH_REGION = config['AZURE_SPEECH_REGION']
 AZURE_STORAGE_CONNECTION_STRING = config['AZURE_STORAGE_CONNECTION_STRING']
 AZURE_STORAGE_CONTAINER_NAME = config['AZURE_STORAGE_CONTAINER_NAME']
 
-# Azure OpenAI configuration (not functional)
-# AZURE_OPENAI_ENDPOINT = config['AZURE_OPENAI_ENDPOINT']
-# AZURE_OPENAI_DEPLOYMENT = config['AZURE_OPENAI_DEPLOYMENT']
-# OPENAI_API_KEY = config['OPENAI_API_KEY']
-
 # Check if the file exists in Azure Storage
 def blob_exists(filename):
     blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
@@ -155,10 +150,16 @@ def download_transcription_files(files_url, original_filename, save_dir="transcr
 
             # Process contenturl_0.json to extract transcription
             if 'contenturl_0.json' in new_file_name:
-                with open(file_path, "r") as json_file:
+                # Remove '_contenturl_0' from the file name
+                renamed_file_name = new_file_name.replace('_contenturl_0', '') # This is the part I want to get rid of
+                renamed_file_path = os.path.join(save_dir, renamed_file_name)
+                os.rename(file_path, renamed_file_path)
+                print(f"Renamed file to: {renamed_file_name}")
+
+                with open(renamed_file_path, "r") as json_file:
                     transcription_data = json.load(json_file)
                     transcription_text = extract_transcription_text(transcription_data)
-                    txt_file_name = new_file_name.replace(".json", ".txt")
+                    txt_file_name = renamed_file_name.replace(".json", ".txt")
                     txt_file_path = os.path.join(save_dir, txt_file_name)
                     with open(txt_file_path, "w") as txt_file:
                         txt_file.write(transcription_text)
@@ -166,6 +167,15 @@ def download_transcription_files(files_url, original_filename, save_dir="transcr
                     # Ensure the file is created and logged
                     if not os.path.exists(txt_file_path):
                         raise FileNotFoundError(f"Failed to create transcription text file: {txt_file_path}")
+
+                # Delete the JSON file after extracting the text
+                os.remove(renamed_file_path)
+                print(f"Deleted JSON file: {renamed_file_name}")
+
+            # Delete JSON files following the naming convention [filename]_report
+            if '_report' in new_file_name:
+                os.remove(file_path)
+                print(f"Deleted JSON file: {new_file_name}")
     else:
         print(f"Failed to download transcription files: {response.status_code}")
         print(response.text)
@@ -184,7 +194,7 @@ def stitch_transcriptions():
     Audio files (and therefore the transcriptions) are split into multiple files with a maximum duration of 10 minutes.
     The format of the names is defined by this:
         timestamp = time.strftime("%m-%d-%Y_%I-%M-%S_%p")
-        filename = f'{timestamp}_recording.wav'
+        filename = f'{timestamp}.wav'
 
     I'll need to stitch the transcriptions together to create a single transcript for the entire audio file.
     I can use the timestamps in the filenames to order the transcriptions correctly
@@ -197,7 +207,7 @@ def stitch_transcriptions():
         return
     
     # Sort the transcript files based on the timestamp in the filename
-    transcript_files.sort(key=lambda x: datetime.strptime(x.split("_")[0], "%Y%m%d-%H%M%S"))
+    transcript_files.sort(key=lambda x: datetime.strptime("_".join(x.split(".txt")[0].split("_")[:3]), "%m-%d-%Y_%I-%M-%S_%p"))
 
     # Get the date that the transcriptions are being stitched
     date = datetime.now().strftime("%m-%d-%Y")
@@ -212,6 +222,7 @@ def stitch_transcriptions():
     print(f"Transcriptions stitched together and saved to {filename}")
 
 def main(args):
+    print("Starting transcription process...")
     if args.transcribe or args.full_run:
         # Check if the recordings directory exists and if so, list all .wav files
         audio_files = [f for f in os.listdir("recordings") if f.endswith('.wav')]
@@ -223,7 +234,7 @@ def main(args):
         audio_files_to_process = [
             audio_file for audio_file in audio_files
             # I want to get rid of the contenturl stuff but I need to do some testing first.
-            if not os.path.exists(f"transcripts/{audio_file.replace('.wav', '_contenturl_0.txt')}")
+            if not os.path.exists(f"transcripts/{audio_file.replace('.wav', '.txt')}")
         ]
 
         if not audio_files_to_process:
