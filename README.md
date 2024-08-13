@@ -2,16 +2,24 @@
 A discord bot intended to transcribe my DnD sessions on Discord.
 
 ## Funtional
-### bot.py
+### bot.py (potentially deprecated)
 Help, join, and leave commands, start and stop recording.
 
-### transcption.py
+### transcption.py (potentially deprecated)
 Transcription of audio files using Azure Speech to Text, all the results are saved to seperate files where they are then stitched together.
 
 TLDR: --transcribe and --stitch fully functional. --summarize is not functional at all.
 
+### test.py (potentially functional)
+Most of the changes made to bot.py have not been tested, but the core functionality should still be there. The recording works for at least 2 people in a voice channel, but it still needs to be tested with more people.
+
+### test_transcription.py (potentially functional)
+This may also work, I'm not totally sure because I haven't tested it yet. The core functionality is the same as transcription.py, but it's been updated to work with the new test.py (which will replace bot.py).
+
 ## Planned
-Fix summarize, add a command to run transcription.py from bot.py.
+Fix summarize.
+
+Add a command to run transcription.py from bot.py.
 
 Maybe use tts to read the summary at the beginning of the next session.
 
@@ -19,15 +27,6 @@ Fix the file naming, not sure why _contenturl_0 is added to the end of the file 
 
 Automatically delete all the JSON files after the text files are created.
 
-Replace the playerID with the player's name or nickname from discord.
-
-Convert the time in the file name to a (slightly) more readable format (maybe instead of hhmmss I can make it hh:dd:ss(AM/PM)).
-
-I need to double check the --transcribe command to ensure that audio files that have been transcribed are not transcribed again. This should just be as simple as checking if the file name is in the list of files that have already been transcribed.
-
 Move the project to a new repository, this one has leaked API keys and I don't want to deal with that. Also make it public so that I can share it with the rest of the group, as well as anyone else who might be interested. Plus I need an MIT license.
 
-## Evental Goal
-I would love it if the transcription worked normally instead of recording the audio from each individual user. The voice_recv library is awesome, but doesn't function the way I want it to, although I may need to delve into the code more to see if it has the functionality I want already built in. If it doesn't, I may need to create a tool to record all the audio from discord and then transcribe it all at once. This has the added issue of needing to know who is speaking, which technically can be done with the voice_recv library. Discord has a feature that allows you to see who is speaking, so I could use that to determine who is speaking at any given time. It would probably need some smoothing so back and forth conversations don't get mixed up, and background noise would be an issue, but I think it could be done. 
-
-Or I could just be dumb and my implementation of voice_recv is wrong.
+Test test.py and test_transcription.py to see if they're functional. If they are they'll replace bot.py and transcription.py.
