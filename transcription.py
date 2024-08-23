@@ -261,7 +261,9 @@ def summarize_transcriptions(transcriptions_text):
         return None
 
 def main(args):
+    print("Starting transcription process...")
     if args.transcribe or args.full_run:
+        print("Checking for new audio files...")
         audio_files = [f for f in os.listdir("recordings") if f.endswith('.wav')]
         if not audio_files:
             print("No audio files found.")

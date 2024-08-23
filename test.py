@@ -151,6 +151,9 @@ class VoiceRecorder(commands.Cog):
         
         return mixed_audio.astype(np.int16).tobytes()
 
+    # I should add a whitelist of users who can use this command to the json file.
+    # If people want to use the bot maybe the person who invited the bot can add them to the whitelist, and they're added by default?
+    # Either that or the owner of the server, or people with a certain role can add people to the whitelist.
     @commands.command()
     async def stop(self, ctx):  # Shutdown the bot
         await ctx.send("Shutting down the bot.")
