@@ -30,3 +30,5 @@ Automatically delete all the JSON files after the text files are created.
 Move the project to a new repository, this one has leaked API keys and I don't want to deal with that. Also make it public so that I can share it with the rest of the group, as well as anyone else who might be interested. Plus I need an MIT license.
 
 Test test.py and test_transcription.py to see if they're functional. If they are they'll replace bot.py and transcription.py.
+
+If the current iteration of the bot doesn't work, I think the solution could be pretty easy. Instead of recording each person individually and then merging all the audio together, I could use a counter to iterate through the dictionary I'm adding the audio packets to. If someone's talking then I add their audio to the dictionary, if nobody is talking I can add like blank filler space (or nothing I guess). This way I can avoid the issue of having to merge all the audio together, and it would also be more space efficient.
