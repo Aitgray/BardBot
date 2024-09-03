@@ -6,7 +6,6 @@ import wave
 import asyncio
 import json
 import time
-import numpy as np
 
 # Load configuration from config.json
 def load_config():
@@ -28,12 +27,13 @@ class VoiceRecorder(commands.Cog):
         self.bot = bot
         self.recording = False
         self.voice_client = None
-        self.audio_data = {}  # Store audio data for each user separately
-        self.channels = 1  # Number of audio channels (Mono)
+        self.audio_data = {}
+        self.channels = 2  # Number of audio channels (Discord typically uses stereo audio)
         self.sample_width = 2  # Number of bytes per sample (16-bit audio)
         self.frame_rate = 48000  # Sample rate (48 kHz)
-        self.recording_task = None
-        self.silence_frame = b'\x00' * self.sample_width * self.channels * (self.frame_rate // 100)  # 10ms of silence
+        self.frame_duration = 1024 / 48000  # Duration of each frame in seconds
+        self.silence_frame = b'\x00' * 1024 * self.channels * self.sample_width
+        self.last_packet_time = {}  # Track last packet time for each user
 
     @commands.command()
     async def join(self, ctx):
@@ -73,9 +73,7 @@ class VoiceRecorder(commands.Cog):
         await ctx.send("Start recording command invoked")
         self.recording = True
         self.audio_data = {}
-
-        # Start a task to reset recording every 10 minutes
-        self.recording_task = asyncio.create_task(self.reset_recording_periodically(ctx))
+        self.last_packet_time = {}
         await ctx.send("Started recording")
 
     @commands.command()
@@ -83,77 +81,44 @@ class VoiceRecorder(commands.Cog):
         print("Stop recording command invoked")
         await ctx.send("Stop recording command invoked")
         self.recording = False
-        if self.recording_task:
-            self.recording_task.cancel()  # Cancel the periodic reset task
         await self.save_audio(ctx)
         await ctx.send("Stopped recording")
 
-    async def reset_recording_periodically(self, ctx):
-        try:
-            while self.recording:
-                await asyncio.sleep(600)  # 10 minutes
-                await self.save_audio(ctx)
-                self.audio_data = {}  # Reset audio data for the next recording period
-                await ctx.send("Recording period reset. Continuing recording...")
-        except asyncio.CancelledError:
-            pass
-
-    def callback(self, user, packet):
-        if packet is not None and packet.decrypted_data is not None:
+    def callback(self, user, data: voice_recv.VoiceData):
+        if self.recording:
+            current_time = time.time()
+            
+            # Initialize user audio data and last packet time if not already present
             if user.id not in self.audio_data:
-                self.audio_data[user.id] = bytearray()
+                self.audio_data[user.id] = []
+                self.last_packet_time[user.id] = current_time
 
-            # Append audio data or silence
-            self.audio_data[user.id].extend(packet.decrypted_data)
+            # Calculate time elapsed since last packet
+            time_elapsed = current_time - self.last_packet_time[user.id]
+            self.last_packet_time[user.id] = current_time
 
-            # Ensure all buffers are synchronized in length
-            max_length = max(len(data) for data in self.audio_data.values())
-            for uid in self.audio_data:
-                if len(self.audio_data[uid]) < max_length:
-                    self.audio_data[uid].extend(self.silence_frame * ((max_length - len(self.audio_data[uid])) // len(self.silence_frame)))
+            # Calculate the number of silence frames to insert
+            num_silence_frames = int(time_elapsed / self.frame_duration) - 1
+
+            # Insert silence frames if there's a gap
+            if num_silence_frames > 0:
+                self.audio_data[user.id].extend([self.silence_frame] * num_silence_frames)
+
+            # Append the received audio data
+            self.audio_data[user.id].append(data.pcm)
 
     async def save_audio(self, ctx):
-        timestamp = time.strftime("%m-%d-%Y_%I-%M-%S_%p")
-        for user_id, audio in self.audio_data.items():
-            user = self.bot.get_user(user_id)
-            if user:
-                filename = f'recordings/{user.name}_{user_id}_{timestamp}.wav'
-                with wave.open(filename, 'wb') as wf:
-                    wf.setnchannels(self.channels)
-                    wf.setsampwidth(self.sample_width)
-                    wf.setframerate(self.frame_rate)
-                    wf.writeframes(b''.join(audio))
-                await ctx.send(f"Saved audio for {user.name} to {filename}")
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
 
-        # Save merged audio for transcription
-        merged_filename = f'recordings/merged_{timestamp}.txt'
-        merged_audio = self.merge_audio_streams()
-        with wave.open(merged_filename, 'wb') as wf:
-            wf.setnchannels(self.channels)
-            wf.setsampwidth(self.sample_width)
-            wf.setframerate(self.frame_rate)
-            wf.writeframes(merged_audio)
-        await ctx.send(f"Saved merged audio to {merged_filename}")
+        for user_id, audio_chunks in self.audio_data.items():
+            filename = f'{timestamp}_{user_id}.wav'
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(self.sample_width)
+                wf.setframerate(self.frame_rate)
+                wf.writeframes(b''.join(audio_chunks))
+            await ctx.send(f"Saved audio to {filename}")
 
-    def merge_audio_streams(self):
-        # Find the length of the longest audio stream
-        max_length = max(len(data) for data in self.audio_data.values())
-        
-        # Initialize an array to hold the mixed audio
-        mixed_audio = np.zeros(max_length // self.sample_width, dtype=np.int32)
-        
-        for user_data in self.audio_data.values():
-            user_audio = np.frombuffer(user_data, dtype=np.int16)
-            mixed_audio[:len(user_audio)] += user_audio
-        
-        # Clip the values to fit in int16
-        mixed_audio = np.clip(mixed_audio, -32768, 32767)
-        
-        return mixed_audio.astype(np.int16).tobytes()
-
-    # I should add a whitelist of users who can use this command to the json file.
-    # If people want to use the bot maybe the person who invited the bot can add them to the whitelist, and they're added by default?
-    # Either that or the owner of the server, or people with a certain role can add people to the whitelist.
     @commands.command()
     async def stop(self, ctx):  # Shutdown the bot
         await ctx.send("Shutting down the bot.")
