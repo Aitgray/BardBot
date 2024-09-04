@@ -6,6 +6,7 @@ import wave
 import asyncio
 import json
 import time
+from pydub import AudioSegment
 
 # Load configuration from config.json
 def load_config():
@@ -34,6 +35,12 @@ class VoiceRecorder(commands.Cog):
         self.frame_duration = 1024 / 48000  # Duration of each frame in seconds
         self.silence_frame = b'\x00' * 1024 * self.channels * self.sample_width
         self.last_packet_time = {}  # Track last packet time for each user
+        self.recordings_folder = "recordings"
+        self.archive_folder = os.path.join(self.recordings_folder, "archive")
+
+        # Create folders if they don't exist
+        os.makedirs(self.recordings_folder, exist_ok=True)
+        os.makedirs(self.archive_folder, exist_ok=True)
 
     @commands.command()
     async def join(self, ctx):
@@ -82,12 +89,13 @@ class VoiceRecorder(commands.Cog):
         await ctx.send("Stop recording command invoked")
         self.recording = False
         await self.save_audio(ctx)
+        await self.merge_recordings(ctx)
         await ctx.send("Stopped recording")
 
     def callback(self, user, data: voice_recv.VoiceData):
         if self.recording:
             current_time = time.time()
-            
+
             # Initialize user audio data and last packet time if not already present
             if user.id not in self.audio_data:
                 self.audio_data[user.id] = []
@@ -111,13 +119,50 @@ class VoiceRecorder(commands.Cog):
         timestamp = time.strftime("%Y%m%d-%H%M%S")
 
         for user_id, audio_chunks in self.audio_data.items():
-            filename = f'{timestamp}_{user_id}.wav'
+            filename = os.path.join(self.recordings_folder, f'{timestamp}_{user_id}.wav')
             with wave.open(filename, 'wb') as wf:
                 wf.setnchannels(self.channels)
                 wf.setsampwidth(self.sample_width)
                 wf.setframerate(self.frame_rate)
                 wf.writeframes(b''.join(audio_chunks))
             await ctx.send(f"Saved audio to {filename}")
+
+    async def merge_recordings(self, ctx):
+        """Merge all recordings with the same timestamp into a single file."""
+        all_files = os.listdir(self.recordings_folder)
+        recordings = [f for f in all_files if f.endswith('.wav')]
+
+        # Group files by timestamp
+        grouped_files = {}
+        for filename in recordings:
+            timestamp = "_".join(filename.split("_")[:2])
+            if timestamp not in grouped_files:
+                grouped_files[timestamp] = []
+            grouped_files[timestamp].append(os.path.join(self.recordings_folder, filename))
+
+            print(f"Grouped files: {grouped_files}") # For debugging
+
+        # Merge files with the same timestamp
+        for timestamp, files in grouped_files.items():
+            if not files:
+                continue
+
+            # Init combined with the first file
+            combined = AudioSegment.from_wav(files[0])
+
+            # Overlay the rest
+            for file in files[1:]:
+                audio_segment = AudioSegment.from_wav(file)
+                combined = combined.overlay(audio_segment)
+
+            # Export the combined audio
+            combined.export(os.path.join(self.archive_folder, f'{timestamp}_merged.wav'), format='wav')
+            await ctx.send(f"Merged audio files for {timestamp}")
+
+            # Move original files to archive
+            for file in files:
+                os.rename(file, os.path.join(self.archive_folder, os.path.basename(file)))
+
 
     @commands.command()
     async def stop(self, ctx):  # Shutdown the bot
