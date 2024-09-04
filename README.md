@@ -2,22 +2,21 @@
 A discord bot intended to transcribe my DnD sessions on Discord.
 
 ## Funtional
-### bot.py (potentially deprecated)
+### bot.py
 Help, join, and leave commands, start and stop recording.
 
-### transcption.py (potentially deprecated)
+### transcption.py
 Transcription of audio files using Azure Speech to Text, all the results are saved to seperate files where they are then stitched together.
 
 TLDR: --transcribe and --stitch fully functional. --summarize is not functional at all.
 
-### test.py (potentially functional)
-Most of the changes made to bot.py have not been tested, but the core functionality should still be there. The recording works for at least 2 people in a voice channel, but it still needs to be tested with more people.
+### test.py
+Recording is partially functional, merging is not functional. There's a bug where the recording can be stopped multiple times ie the recording doesn't actually end.
 
 ### test_transcription.py (potentially functional)
-This may also work, I'm not totally sure because I haven't tested it yet. The core functionality is the same as transcription.py, but it's been updated to work with the new test.py (which will replace bot.py).
+This has not been tested.
 
 ## Planned
-Fix summarize.
 
 Add a command to run transcription.py from bot.py.
 
@@ -31,4 +30,11 @@ Move the project to a new repository, this one has leaked API keys and I don't w
 
 Test test.py and test_transcription.py to see if they're functional. If they are they'll replace bot.py and transcription.py.
 
-If the current iteration of the bot doesn't work, I think the solution could be pretty easy. Instead of recording each person individually and then merging all the audio together, I could use a counter to iterate through the dictionary I'm adding the audio packets to. If someone's talking then I add their audio to the dictionary, if nobody is talking I can add like blank filler space (or nothing I guess). This way I can avoid the issue of having to merge all the audio together, and it would also be more space efficient.
+If I'm merging the audio based on the time, someone who's not there for the beginning of the recording won't get merged in. I'll need to offset the time based on when the person joined the channel and then merge the audio based on that.
+
+## Issues
+Merge may be functional.
+
+Summarize is not functional.
+
+Stop recording is only partially functional.
