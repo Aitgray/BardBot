@@ -1,5 +1,7 @@
 {
     "DISCORD_BOT_TOKEN": "",
+    "BOT_PREFIX": "",
+    "SPECIAL_PERMISSIONS_ROLE": "",
     
     "AZURE_STORAGE_CONNECTION_STRING": "",
     "AZURE_STORAGE_CONTAINER_NAME": "",
@@ -9,8 +11,5 @@
     "OPENAI_API_KEY": "",
     "AZURE_OPENAI_ENDPOINT": "",
 
-    "FFMPEG_PATH": "",
-    
-    "BOT_PREFIX": "",
-    "SPECIAL_PERMISSIONS_ROLE": ""
+    "FFMPEG_PATH": ""
 }
