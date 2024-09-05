@@ -21,7 +21,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True  # Enable voice state intents
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=config["BOT_PREFIX"], intents=intents)
 
 class VoiceRecorder(commands.Cog):
     def __init__(self, bot):
@@ -85,6 +85,10 @@ class VoiceRecorder(commands.Cog):
 
     @commands.command()
     async def stop_recording(self, ctx):
+        if not self.recording:
+            await ctx.send("Not currently recording")
+            return
+        
         print("Stop recording command invoked")
         await ctx.send("Stop recording command invoked")
         self.recording = False
@@ -135,7 +139,10 @@ class VoiceRecorder(commands.Cog):
         # Group files by timestamp
         grouped_files = {}
         for filename in recordings:
-            timestamp = "_".join(filename.split("_")[:2])
+            timestamp = filename.split("_")[0]
+
+            print(f"Timestamp: {timestamp}") # For debugging
+
             if timestamp not in grouped_files:
                 grouped_files[timestamp] = []
             grouped_files[timestamp].append(os.path.join(self.recordings_folder, filename))
@@ -166,8 +173,15 @@ class VoiceRecorder(commands.Cog):
 
     @commands.command()
     async def stop(self, ctx):  # Shutdown the bot
-        await ctx.send("Shutting down the bot.")
-        await self.bot.close()
+        # First get the user who invoked the command
+        user = ctx.author
+
+        # Check if the user is an admin (this will be in the form of a role)
+        if any(role.name == config["SPECIAL_PERMISSIONS_ROLE"] for role in user.roles):
+            await ctx.send("Shutting down the bot.")
+            await self.bot.close()
+        else:
+            await ctx.send("You do not have permission to shut down the bot.")
 
 @bot.event
 async def on_ready():
