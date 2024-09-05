@@ -170,6 +170,41 @@ class VoiceRecorder(commands.Cog):
             for file in files:
                 os.rename(file, os.path.join(self.archive_folder, os.path.basename(file)))
 
+    # new callback function that will be used to save audio to a single file instead of a file for each user
+    def new_callback(self, user, data: voice_recv.VoiceData):
+        if self.recording:
+            current_time = time.time()
+
+            # Initialize user audio data and last packet time if not already present
+            if "all" not in self.audio_data:
+                self.audio_data["all"] = []
+            if user.id not in self.last_packet_time:
+                self.last_packet_time[user.id] = current_time
+
+            # Calculate time elapsed since last packet
+            time_elapsed = current_time - self.last_packet_time[user.id]
+            self.last_packet_time[user.id] = current_time
+
+            # Calculate the number of silence frames to insert
+            num_silence_frames = int(time_elapsed / self.frame_duration) - 1
+
+            # Insert silence frames if there's a gap
+            if num_silence_frames > 0:
+                self.audio_data["all"].extend([self.silence_frame] * num_silence_frames)
+
+            # Append the received audio data
+            self.audio_data["all"].append(data.pcm)
+
+    async def new_save_audio(self, ctx): # Saves audio to a single file instead of multiple files that are merged later
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        filename = os.path.join(self.recordings_folder, f'{timestamp}_all.wav')
+        with wave.open(filename, 'wb') as wf:
+            wf.setnchannels(self.channels)
+            wf.setsampwidth(self.sample_width)
+            wf.setframerate(self.frame_rate)
+            wf.writeframes(b''.join(self.audio_data["all"]))
+        await ctx.send(f"Saved audio to {filename}")
+
 
     @commands.command()
     async def stop(self, ctx):  # Shutdown the bot
