@@ -27,7 +27,45 @@ Add a command to run transcription.py from bot.py (this will require the transcr
 
 Maybe use tts to read the summary at the beginning of the next session.
 
+Modify bot.py to handle the upload of the audio files, I'll use a seperate thread to handle the upload so that the bot can continue to function while the audio is being uploaded.
+
+Also figure out how to add a progress bar for the transcription, even if it's just how many files are completed vs how many files are left.
+
 ## Issues
+
+---
+
+### `local_bot.py` Status
+
+The `local_bot.py` file is a newer, local-focused version of the bot. It uses the `discord-ext-voice-recv` library for voice handling and `local_transcription.py` for transcription. Many of the advanced features are currently implemented as **pseudocode** and will require further development to become functional.
+
+**Implemented Features:**
+
+*   Joining and leaving voice channels.
+*   Recording audio from multiple users and saving it to individual `.wav` files (diarization).
+*   Local transcription of the `.wav` files using the `speech_recognition` library.
+
+**Features Implemented as Pseudocode:**
+
+*   **SQLite Integration:** The logic for saving transcriptions to a SQLite database is laid out in the `save_audio` function but is not yet functional.
+*   **LLM Summarization with RAG:** The `summarize` command contains pseudocode for a Retrieval-Augmented Generation (RAG) system. This system is designed to:
+    *   Use notes from an Obsidian vault as context.
+    *   Use previously generated summaries as context.
+    *   Send the context and the current transcript to a local LLM for summarization.
+*   **Discord Summary Posting:** The `post_summary` function has pseudocode for posting the generated summary to a specific Discord channel.
+*   **Text-to-Speech (TTS):** The `read_summary` command has pseudocode for using a local TTS engine to read the summary back into the voice channel.
 Merge may be functional.
 
-Summarize is not functional.
+I need to create a copy of the bot that uses open source software instead of Azure.
+* The voice_recv library has speech recognition built in now, so I can use that instead of Azure.
+* I may want to use something like SQLite to store the transcriptions.
+    * This would allow for easier querying and retrieval of past transcriptions.
+    * I could use it to train an AI model for better transcription accuracy, as well as for speaker identification. (As well as implementing a more cohesive summarization)
+* I'd like to look into implementing TTS as well.
+
+Summarize is not functional:
+* I need to get a local LLM running
+    * It needs a context window of at least 100k tokens, or I need to break the text into smaller chunks.
+    * I believe my hardware can support a model with 30B parameters.
+    * I should use RAG so I can tie it into my notes from Obsidian.
+    * I'll also need to figure out system prompts and whatnot.
