@@ -1,0 +1,2 @@
+{"session_id": "test_session", "segment_id": 1, "speaker_label": "user1", "t_start": 1672444800, "t_end": 1672444805, "text": "Hello, this is a test."}
+{"session_id": "test_session", "segment_id": 2, "speaker_label": "user2", "t_start": 1672444806, "t_end": 1672444810, "text": "This is another test."}

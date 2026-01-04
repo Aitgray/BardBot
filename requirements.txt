@@ -1,0 +1,7 @@
+discord.py
+discord-ext-voice-recv
+SpeechRecognition
+pydub
+openai-whisper
+qdrant-client
+sentence-transformers
