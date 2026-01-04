@@ -3,6 +3,7 @@ config.json
 recordings/*.wav
 recordings/archive/*.wav
 
+transcripts/
 transcripts/*.txt
 transcripts/*.json
 transcripts/archive/*.txt
