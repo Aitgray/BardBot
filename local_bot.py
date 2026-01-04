@@ -3,11 +3,14 @@ import logging
 import discord
 from discord.ext import commands, voice_recv
 import os
-import wave
-import asyncio
 import json
 import time
-from local_transcription import transcribe_audio
+import speech_recognition as sr
+import io
+import threading
+from pydub import AudioSegment
+from vector_db import VectorDB
+import requests
 
 # Load configuration from config.json
 def load_config():
@@ -24,16 +27,67 @@ intents.voice_states = True  # Enable voice state intents
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+class TranscriptionSink(voice_recv.BasicSink):
+    def __init__(self, callback):
+        super().__init__(self.process_audio)
+        self.callback = callback
+        self.recognizer = sr.Recognizer()
+        self.audio_data = {}
+
+    def process_audio(self, user, data: voice_recv.VoiceData):
+        if user.id not in self.audio_data:
+            self.audio_data[user.id] = io.BytesIO()
+        self.audio_data[user.id].write(data.pcm)
+
+        # Process the audio in a separate thread to avoid blocking
+        threading.Thread(target=self.transcribe_chunk, args=(user.id, data.pcm)).start()
+
+    def transcribe_chunk(self, user_id, pcm_data):
+        audio_segment = AudioSegment.from_raw(
+            io.BytesIO(pcm_data),
+            sample_width=2,
+            frame_rate=48000,
+            channels=2
+        )
+        # Export as a temporary wav file in memory
+        wav_io = io.BytesIO()
+        audio_segment.export(wav_io, format="wav")
+        wav_io.seek(0)
+
+        with sr.AudioFile(wav_io) as source:
+            audio = self.recognizer.record(source)
+            try:
+                # Using recognize_whisper for local transcription
+                # This may require a local model to be available
+                text = self.recognizer.recognize_whisper(audio, language="english")
+                if text:
+                    self.callback(user_id, text)
+            except sr.UnknownValueError:
+                pass  # Ignore if speech is not understood
+            except sr.RequestError as e:
+                print(f"Could not request results from Whisper; {e}")
+
 class VoiceRecorder(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.recording = False
         self.voice_client = None
-        self.audio_data = {}
-        self.channels = 2  # Number of audio channels (Discord typically uses stereo audio)
-        self.sample_width = 2  # Number of bytes per sample (16-bit audio)
-        self.frame_rate = 48000  # Sample rate (48 kHz)
-        self.recording_task = None
+        self.recording = False
+        self.session_id = None
+        self.transcripts = []
+
+    def transcription_callback(self, user_id, text):
+        if self.recording:
+            timestamp = time.time()
+            segment = {
+                "session_id": self.session_id,
+                "segment_id": len(self.transcripts) + 1,
+                "speaker_label": str(user_id),
+                "t_start": timestamp,
+                "t_end": timestamp, # Note: This is a simplification. For more accurate t_end, we would need more sophisticated logic.
+                "text": text,
+            }
+            self.transcripts.append(segment)
+            print(f"User {user_id}: {text}")
 
     @commands.command()
     async def join(self, ctx):
@@ -44,9 +98,9 @@ class VoiceRecorder(commands.Cog):
             await ctx.send(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
             try:
                 self.voice_client = await ctx.author.voice.channel.connect(cls=voice_recv.VoiceRecvClient)
-                self.voice_client.listen(voice_recv.BasicSink(self.callback))
-                print("Connected to the voice channel.")
-                await ctx.send("Connected to the voice channel.")
+                self.voice_client.listen(TranscriptionSink(self.transcription_callback))
+                print("Connected to the voice channel and listening for transcriptions.")
+                await ctx.send("Connected to the voice channel and listening for transcriptions.")
             except Exception as e:
                 print(f"Failed to connect to the voice channel: {e}")
                 await ctx.send(f"Failed to connect to the voice channel: {e}")
@@ -59,6 +113,8 @@ class VoiceRecorder(commands.Cog):
         print("Leave command invoked")
         await ctx.send("Leave command invoked")
         if self.voice_client:
+            if self.recording:
+                await self.stop_recording(ctx)
             await self.voice_client.disconnect()
             self.voice_client = None
             print("Disconnected from the voice channel.")
@@ -71,147 +127,84 @@ class VoiceRecorder(commands.Cog):
     async def start_recording(self, ctx):
         print("Start recording command invoked")
         await ctx.send("Start recording command invoked")
+        self.session_id = time.strftime("%Y%m%d-%H%M%S")
         self.recording = True
-        self.audio_data = {}
-
-        # Start a task to reset recording every 10 minutes
-        self.recording_task = asyncio.create_task(self.reset_recording_periodically(ctx))
-        await ctx.send("Started recording")
+        self.transcripts = []
+        await ctx.send("Started recording.")
 
     @commands.command()
     async def stop_recording(self, ctx):
         print("Stop recording command invoked")
         await ctx.send("Stop recording command invoked")
         self.recording = False
-        if self.recording_task:
-            self.recording_task.cancel()  # Cancel the periodic reset task
-        await self.save_audio(ctx)
-        await ctx.send("Stopped recording")
+        await self.write_transcription()
+        await ctx.send("Stopped recording and saved transcript.")
 
-    async def reset_recording_periodically(self, ctx):
-        try:
-            while self.recording:
-                await asyncio.sleep(600)  # 10 minutes
-                await self.save_audio(ctx)
-                self.audio_data = {}  # Reset audio data for the next recording period
-                await ctx.send("Recording period reset. Continuing recording...")
-        except asyncio.CancelledError:
-            pass
+    async def write_transcription(self):
+        if not self.transcripts:
+            return
 
-    def callback(self, user, data: voice_recv.VoiceData):
-        if self.recording:
-            if user.id not in self.audio_data:
-                self.audio_data[user.id] = []
-            self.audio_data[user.id].append(data.pcm)
+        session_dir = os.path.join("sessions", self.session_id)
+        if not os.path.exists(session_dir):
+            os.makedirs(session_dir)
 
-    async def save_audio(self, ctx):
-        for user_id, audio_chunks in self.audio_data.items():
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            filename = f'{timestamp}_{user_id}.wav'
-            filepath = os.path.join("recordings", filename)
-            with wave.open(filepath, 'wb') as wf:
-                wf.setnchannels(self.channels)
-                wf.setsampwidth(self.sample_width)
-                wf.setframerate(self.frame_rate)
-                wf.writeframes(b''.join(audio_chunks))
-            await ctx.send(f"Saved audio to {filename}")
+        transcript_path = os.path.join(session_dir, "turns.jsonl")
+        with open(transcript_path, 'w') as f:
+            for segment in self.transcripts:
+                f.write(json.dumps(segment) + '\n')
+        print(f"Saved transcript to {transcript_path}")
 
-            # Transcribe the audio file
-            transcription = transcribe_audio(filepath)
-            transcript_filename = f'{timestamp}_{user_id}.txt'
-            transcript_filepath = os.path.join("transcripts", transcript_filename)
-            with open(transcript_filepath, "w") as f:
-                f.write(transcription)
-            await ctx.send(f"Transcription for {filename} saved to {transcript_filename}")
 
-            # --- PSEUDOCODE FOR SQLITE INTEGRATION ---
-            # 1. Connect to the SQLite database.
-            #    - The database file will be created if it doesn't exist.
-            #
-            # import sqlite3
-            # conn = sqlite3.connect('transcripts.db')
-            # cursor = conn.cursor()
-            #
-            # 2. Create a table to store transcripts if it doesn't exist.
-            #
-            # cursor.execute('''
-            #     CREATE TABLE IF NOT EXISTS transcripts (
-            #         id INTEGER PRIMARY KEY AUTOINCREMENT,
-            #         user_id TEXT NOT NULL,
-            #         timestamp TEXT NOT NULL,
-            #         transcription_text TEXT NOT NULL
-            #     )
-            # ''')
-            #
-            # 3. Insert the new transcription into the table.
-            #
-            # cursor.execute("INSERT INTO transcripts (user_id, timestamp, transcription_text) VALUES (?, ?, ?)",
-            #                (user_id, timestamp, transcription))
-            # conn.commit()
-            # conn.close()
-            # --- END PSEUDOCODE ---
 
     @commands.command()
     async def summarize(self, ctx):
         """
-        Summarizes the transcriptions using a local LLM.
-        This is a placeholder for the actual implementation.
+        Summarizes the transcriptions using a local LLM with RAG.
         """
-        # --- PSEUDOCODE FOR LOCAL LLM SUMMARIZATION WITH RAG ---
-        # 1. Consolidate the current session's transcript files into one text block.
-        #
-        # consolidated_transcript = ""
-        # for filename in os.listdir("transcripts"):
-        #     if filename.endswith(".txt"):
-        #         user_id = filename.split('_')[1]
-        #         with open(os.path.join("transcripts", filename), "r") as f:
-        #             consolidated_transcript += f"User {user_id}:\n{f.read()}\n\n"
-        #
-        # 2. Retrieve relevant notes from Obsidian vault.
-        #    - You would need to specify the path to your Obsidian vault.
-        #    - You could search for files with keywords from the current transcript.
-        #
-        # import os
-        # obsidian_vault_path = "/path/to/your/obsidian/vault"
-        # relevant_notes = ""
-        # for root, dirs, files in os.walk(obsidian_vault_path):
-        #     for file in files:
-        #         if file.endswith(".md"):
-        #             # Add logic here to determine if the note is relevant
-        #             # For example, by searching for keywords from the transcript.
-        #             with open(os.path.join(root, file), "r") as f:
-        #                 relevant_notes += f.read() + "\n\n"
-        #
-        # 3. Retrieve previous summaries.
-        #    - You could read summary files from a directory.
-        #    - Or, you could query the SQLite database for past session data.
-        #
-        # previous_summaries = ""
-        # # Logic to retrieve past summaries
-        #
-        # 4. Combine the context (notes, past summaries) and the current transcript.
-        #
-        # context = f"""Relevant Notes:\n{relevant_notes}\n\nPrevious Summaries:\n{previous_summaries}"""
-        # prompt = f"""Using the following context, please summarize the transcript.\n\nContext:\n{context}\n\nTranscript:\n{consolidated_transcript}"""
-        #
-        # 5. Send the combined prompt to a local LLM API.
-        #
-        # import requests
-        # try:
-        #     response = requests.post("http://localhost:8080/summarize", json={"text": prompt})
-        #     if response.status_code == 200:
-        #         summary = response.json()["summary"]
-        #     else:
-        #         summary = "Error: Could not get summary from local LLM."
-        # except requests.exceptions.RequestException as e:
-        #     summary = f"Error: Could not connect to local LLM: {e}"
-        #
-        # 6. The `summary` variable would now hold the summarized text.
-        #    - You should also save this summary for future RAG context.
-        # --- END PSEUDOCODE ---
+        await ctx.send("Summarizing transcript... this may take a moment.")
 
-        summary = "This is a placeholder summary. Implement the pseudocode to generate a real summary."
-        await ctx.send(summary)
+        # 1. Initialize VectorDB
+        vector_db = VectorDB()
+
+        # 2. Index transcripts and Obsidian vault
+        vector_db.index_transcripts()
+        obsidian_vault_path = config.get("OBSIDIAN_VAULT_PATH")
+        if obsidian_vault_path:
+            vector_db.index_obsidian_vault(obsidian_vault_path)
+        else:
+            await ctx.send("Obsidian vault path not configured. Skipping Obsidian context.")
+
+        # 3. Consolidate current session's transcript
+        if not self.transcripts:
+            await ctx.send("No transcript to summarize.")
+            return
+
+        consolidated_transcript = ""
+        for segment in self.transcripts:
+            consolidated_transcript += f"User {segment['speaker_label']}: {segment['text']}\n"
+
+        # 4. Retrieve relevant notes from Obsidian vault
+        search_results = vector_db.search(consolidated_transcript)
+        relevant_notes = ""
+        for hit in search_results:
+            if hit.payload.get('source'):
+                relevant_notes += hit.payload['text'] + "\n\n"
+
+        # 5. Construct prompt for local LLM
+        context = f"""Relevant Notes from Obsidian:\n{relevant_notes}\n\n"""
+        prompt = f"""Using the following context, please summarize the transcript.\n\nContext:\n{context}\n\nTranscript:\n{consolidated_transcript}"""
+
+        # 6. Send prompt to local LLM API
+        try:
+            response = requests.post("http://localhost:8080/summarize", json={"text": prompt})
+            if response.status_code == 200:
+                summary = response.json()["summary"]
+            else:
+                summary = f"Error: Could not get summary from local LLM. Status code: {response.status_code}"
+        except requests.exceptions.RequestException as e:
+            summary = f"Error: Could not connect to local LLM: {e}"
+
+        await ctx.send(f"**Summary:**\n{summary}")
         await self.post_summary(ctx, summary)
 
 
@@ -300,15 +293,14 @@ async def on_ready():
     print('------')
 
 async def main():
-    # Create recordings and transcripts directories if they don't exist
-    if not os.path.exists("recordings"):
-        os.makedirs("recordings")
-    if not os.path.exists("transcripts"):
-        os.makedirs("transcripts")
+    # Create sessions directory if it doesn't exist
+    if not os.path.exists("sessions"):
+        os.makedirs("sessions")
 
     async with bot:
         await bot.add_cog(VoiceRecorder(bot))
         await bot.start(DISCORD_BOT_TOKEN)
 
 if __name__ == "__main__":
+    import asyncio
     asyncio.run(main())

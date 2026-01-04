@@ -11,5 +11,7 @@
     "OPENAI_API_KEY": "",
     "AZURE_OPENAI_ENDPOINT": "",
 
+    "OBSIDIAN_VAULT_PATH": "/path/to/your/obsidian/vault",
+
     "FFMPEG_PATH": ""
 }
