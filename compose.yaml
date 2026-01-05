@@ -1,0 +1,33 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    # GPU on Linux Compose / Docker Desktop with NVIDIA support:
+    # If this causes issues on your setup, remove this section and run without it first.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  bardbot:
+    build: .
+    container_name: bardbot
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: llama3.1:8b
+    volumes:
+      - ./config.json:/app/config.json
+      - ./sessions:/app/sessions
+      - ./recordings:/app/recordings
+      - ./transcripts:/app/transcripts
+      - ./whisper_cache:/root/.cache/whisper
+
+volumes:
+  ollama:

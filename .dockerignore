@@ -1,0 +1,27 @@
+# Large runtime artifacts
+arhive/
+sessions/
+recordings/
+transcripts/
+whisper_cache/
+ollama_cache/
+*.wav
+*.mp3
+*.m4a
+
+# Python noise
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Git / IDE
+.git/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
