@@ -3,6 +3,10 @@ config.json
 recordings/*.wav
 recordings/archive/*.wav
 
+sessions/
+
+whisper_cache/
+
 transcripts/
 transcripts/*.txt
 transcripts/*.json
