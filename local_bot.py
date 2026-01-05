@@ -1,4 +1,3 @@
-
 import logging
 import discord
 from discord.ext import commands, voice_recv
@@ -11,6 +10,7 @@ import threading
 from pydub import AudioSegment
 from vector_db import VectorDB
 import requests
+import whisper
 
 # Load configuration from config.json
 def load_config():
@@ -28,44 +28,63 @@ intents.voice_states = True  # Enable voice state intents
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 class TranscriptionSink(voice_recv.BasicSink):
-    def __init__(self, callback):
+    def __init__(self, callback, *, whisper_model_name: str = "small.en"):
         super().__init__(self.process_audio)
         self.callback = callback
-        self.recognizer = sr.Recognizer()
-        self.audio_data = {}
+        self.audio_data: dict[int, io.BytesIO] = {}
+        self.whisper_model_name = whisper_model_name
+        self.whisper_model = whisper.load_model(self.whisper_model_name, device="cuda")
 
     def process_audio(self, user, data: voice_recv.VoiceData):
         if user.id not in self.audio_data:
             self.audio_data[user.id] = io.BytesIO()
         self.audio_data[user.id].write(data.pcm)
 
-        # Process the audio in a separate thread to avoid blocking
-        threading.Thread(target=self.transcribe_chunk, args=(user.id, data.pcm)).start()
+    def flush_and_transcribe(self, session_dir: str) -> list[dict]:
+        segments: list[dict] = []
 
-    def transcribe_chunk(self, user_id, pcm_data):
-        audio_segment = AudioSegment.from_raw(
-            io.BytesIO(pcm_data),
-            sample_width=2,
-            frame_rate=48000,
-            channels=2
-        )
-        # Export as a temporary wav file in memory
-        wav_io = io.BytesIO()
-        audio_segment.export(wav_io, format="wav")
-        wav_io.seek(0)
+        recordings_dir = os.path.join(session_dir, "recordings")
+        os.makedirs(recordings_dir, exist_ok=True)
 
-        with sr.AudioFile(wav_io) as source:
-            audio = self.recognizer.record(source)
-            try:
-                # Using recognize_whisper for local transcription
-                # This may require a local model to be available
-                text = self.recognizer.recognize_whisper(audio, language="english")
-                if text:
-                    self.callback(user_id, text)
-            except sr.UnknownValueError:
-                pass  # Ignore if speech is not understood
-            except sr.RequestError as e:
-                print(f"Could not request results from Whisper; {e}")
+        now = time.time()
+        seg_id = 1
+        for user_id, buf in self.audio_data.items():
+            pcm = buf.getvalue()
+            if not pcm:
+                continue
+
+            audio_segment = AudioSegment.from_raw(
+                io.BytesIO(pcm),
+                sample_width=2,
+                frame_rate=48000,
+                channels=2
+            )
+            wav_path = os.path.join(recordings_dir, f"{user_id}.wav")
+            audio_segment.export(wav_path, format="wav")
+
+            result = self.whisper_model.transcribe(
+                wav_path,
+                language="en",
+                fp16=True,
+                verbose=False
+            )
+            text = (result.get("text") or "").strip()
+            if not text:
+                continue
+
+            segments.append({
+                "session_id": None,
+                "segment_id": seg_id,
+                "speaker_label": str(user_id),
+                "t_start": now,
+                "t_end": now,
+                "text": text,
+                "audio_path": wav_path
+            })
+            seg_id += 1
+
+        self.audio_data = {}
+        return segments
 
 class VoiceRecorder(commands.Cog):
     def __init__(self, bot):
@@ -74,6 +93,7 @@ class VoiceRecorder(commands.Cog):
         self.recording = False
         self.session_id = None
         self.transcripts = []
+        self.sink: TranscriptionSink | None = None
 
     def transcription_callback(self, user_id, text):
         if self.recording:
@@ -91,22 +111,24 @@ class VoiceRecorder(commands.Cog):
 
     @commands.command()
     async def join(self, ctx):
-        print("Join command invoked")
-        await ctx.send("Join command invoked")
-        if ctx.author.voice:
-            print(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
-            await ctx.send(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
-            try:
-                self.voice_client = await ctx.author.voice.channel.connect(cls=voice_recv.VoiceRecvClient)
-                self.voice_client.listen(TranscriptionSink(self.transcription_callback))
-                print("Connected to the voice channel and listening for transcriptions.")
-                await ctx.send("Connected to the voice channel and listening for transcriptions.")
-            except Exception as e:
-                print(f"Failed to connect to the voice channel: {e}")
-                await ctx.send(f"Failed to connect to the voice channel: {e}")
-        else:
-            print("Author is not in a voice channel")
-            await ctx.send("You are not in a voice channel.")
+        await ctx.send(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
+        try:
+            self.voice_client = await ctx.author.voice.channel.connect(cls=voice_recv.VoiceRecvClient)
+            # Initialize sink once per connection.
+            # Uses local Whisper small.en; no per-chunk recognize_whisper() calls.
+            model_name = config.get("WHISPER_MODEL", "small.en")
+            self.sink = TranscriptionSink(self.transcription_callback, whisper_model_name=model_name)
+            self.voice_client.listen(self.sink)
+            print("Connected to the voice channel and listening for transcriptions.")
+            await ctx.send("Connected to the voice channel and listening for transcriptions.")
+        except Exception as e:
+            print(f"Failed to connect to the voice channel: {e}")
+            await ctx.send(f"Failed to connect to the voice channel: {e}")
+        await ctx.send("Start recording command invoked")
+        self.session_id = time.strftime("%Y%m%d-%H%M%S")
+        self.recording = True
+        self.transcripts = []
+        await ctx.send("Started recording.")
 
     @commands.command()
     async def leave(self, ctx):
@@ -134,14 +156,19 @@ class VoiceRecorder(commands.Cog):
 
     @commands.command()
     async def stop_recording(self, ctx):
-        print("Stop recording command invoked")
-        await ctx.send("Stop recording command invoked")
+        print("Stop recording command invoked!")
+        await ctx.send("Stop recording command invoked!")
         self.recording = False
-        await self.write_transcription()
+        print("Writing transcription")
+        await self.write_transcription_offline() # Hanging somewhere in this file I think
         await ctx.send("Stopped recording and saved transcript.")
 
-    async def write_transcription(self):
-        if not self.transcripts:
+    async def write_transcription_offline(self):
+        if not self.session_id:
+            return
+        
+        if not self.sink:
+            print("No sink available; are you connected and listening?")
             return
 
         session_dir = os.path.join("sessions", self.session_id)
@@ -149,12 +176,27 @@ class VoiceRecorder(commands.Cog):
             os.makedirs(session_dir)
 
         transcript_path = os.path.join(session_dir, "turns.jsonl")
-        with open(transcript_path, 'w') as f:
-            for segment in self.transcripts:
-                f.write(json.dumps(segment) + '\n')
+        
+        loop = asyncio.get_running_loop()
+        segments = await loop.run_in_executor(
+            None,
+            self.sink.flush_and_transcribe,
+            session_dir
+        )
+
+        for seg in segments:
+            seg["session_id"] = self.session_id
+
+        if not segments:
+            print("No transcribed segments produced.")
+            return
+
+        with open(transcript_path, 'w', encoding="utf-8") as f:
+            for segment in segments:
+                f.write(json.dumps(segment) + "\n")
+
+        self.transcripts = segments
         print(f"Saved transcript to {transcript_path}")
-
-
 
     @commands.command()
     async def summarize(self, ctx):
