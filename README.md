@@ -1,63 +1,50 @@
 # BardBot
-A discord bot intended to transcribe my DnD sessions on Discord.
 
-## Funtional
-### bot.py
-Help, join, and leave commands, start and stop recording.
+BardBot is a Discord bot that records your DnD sessions, transcribes them, and provides a summary of the conversation. It uses a local-first approach, leveraging open-source tools like Whisper for transcription and a local LLM for summarization.
 
-### transcption.py
-Transcription of audio files using Azure Speech to Text, all the results are saved to seperate files where they are then stitched together.
+## Current Features
 
-TLDR: --transcribe and --stitch fully functional. --summarize is not functional at all.
+*   **Voice Recording:** Records all participants in a voice channel.
+*   **Transcription:** Uses OpenAI's Whisper to transcribe the recorded audio.
+*   **Diarization:** Separates the transcription by speaker.
+*   **Summarization:** Uses a local Large Language Model (LLM) to summarize the transcription.
+*   **Retrieval-Augmented Generation (RAG):** Can use notes from an Obsidian vault to provide context for the summarization.
+*   **Persistent Transcripts:** Transcripts are saved in a canonical JSONL format, enabling reprocessing and retrieval.
+*   **Vector Database:** Uses Qdrant to store and retrieve embeddings of transcripts and Obsidian notes.
+*   **Local LLM Support:** Integrated with Ollama to run a local LLM for summarization.
 
-### test.py
-Recording is partially functional, merging is not functional. There's a bug where the recording can be stopped multiple times ie the recording doesn't actually end.
+## Setup and Usage
 
-### test_transcription.py (potentially functional)
-This has not been tested.
+The recommended way to run BardBot is with Docker.
 
-## Planned
-If I'm merging the audio based on the time, someone who's not there for the beginning of the recording won't get merged in. I'll need to offset the time based on when the person joined the channel and then merge the audio based on that. - This seems to have more weight that I initially thought, I'll need to do some testing to see if this is actually a problem. It's possible the silence isn't added at the beginning of the audio file, the file starts the first time someone speaks which is problematic.
+1.  **Install Docker and Docker Compose.**
+2.  **Create a `config.json` file:**
+    *   Copy the `example_config.json` file to `config.json`.
+    *   Fill in the required values:
+        *   `DISCORD_BOT_TOKEN`: Your Discord bot token.
+        *   `OBSIDIAN_VAULT_PATH` (optional): The absolute path to your Obsidian vault.
+        *   `WHISPER_MODEL` (optional): The Whisper model to use for transcription. Defaults to `small.en`.
+3.  **Run the bot:**
+    ```bash
+    docker-compose up -d
+    ```
 
-Automatically delete all the JSON files after the text files are created.
+## Commands
 
-Move the project to a new repository, this one has leaked API keys and I don't want to deal with that. Also make it public so that I can share it with the rest of the group, as well as anyone else who might be interested. Plus I need an MIT license.
+-   `!join`: Joins the voice channel you are currently in.
+-   `!leave`: Leaves the voice channel.
+-   `!start_recording`: Starts recording the voice channel.
+-   `!stop_recording`: Stops recording and saves the transcript.
+-   `!summarize`: Summarizes the current transcript.
+-   `!stop`: Shuts down the bot.
 
-Add a command to run transcription.py from bot.py (this will require the transcription file to be imported which is a bit of a undertaking).
+## Configuration
 
-Maybe use tts to read the summary at the beginning of the next session.
+The `config.json` file is used to configure the bot.
 
-Modify bot.py to handle the upload of the audio files, I'll use a seperate thread to handle the upload so that the bot can continue to function while the audio is being uploaded.
-
-Also figure out how to add a progress bar for the transcription, even if it's just how many files are completed vs how many files are left.
-
-## Issues
-
----
-
-### `local_bot.py` Status
-
-The `local_bot.py` file is a newer, local-focused version of the bot. It uses the `discord-ext-voice-recv` library for voice handling and `local_transcription.py` for transcription. Many of the advanced features are currently implemented as **pseudocode** and will require further development to become functional.
-
-**Implemented Features:**
-
-*   Joining and leaving voice channels.
-*   Recording audio from multiple users and saving it to individual `.wav` files (diarization).
-*   Local transcription of the `.wav` files using the `speech_recognition` library.
-
-**Features Implemented as Pseudocode:**
-
-*   **SQLite Integration:** The logic for saving transcriptions to a SQLite database is laid out in the `save_audio` function but is not yet functional.
-*   **LLM Summarization with RAG:** The `summarize` command contains pseudocode for a Retrieval-Augmented Generation (RAG) system. This system is designed to:
-    *   Use notes from an Obsidian vault as context.
-    *   Use previously generated summaries as context.
-    *   Send the context and the current transcript to a local LLM for summarization.
-*   **Discord Summary Posting:** The `post_summary` function has pseudocode for posting the generated summary to a specific Discord channel.
-*   **Text-to-Speech (TTS):** The `read_summary` command has pseudocode for using a local TTS engine to read the summary back into the voice channel.
-Merge may be functional.
-
-I need to create a copy of the bot that uses open source software instead of Azure.
-* The voice_recv library has speech recognition built in now, so I can use that instead of Azure.
+-   `DISCORD_BOT_TOKEN`: Your Discord bot token. This is required.
+-   `OBSIDIAN_VAULT_PATH`: The absolute path to your Obsidian vault. This is optional. If you provide a path, the bot will use your notes as context for the summarization.
+-   `WHISPER_MODEL`: The Whisper model to use for transcription. This is optional. Defaults to `small.en`. You can find a list of available models on the [OpenAI Whisper GitHub page](https://github.com/openai/whisper).
 
 # Action Plan — Local RAG-First Transcript Summarization Bot
 
@@ -72,11 +59,11 @@ I need to create a copy of the bot that uses open source software instead of Azu
 
 ## 1. Normalize and Persist Transcripts (Foundational)
 
-- [ ] Introduce a stable `session_id` (e.g., `YYYYMMDD_dnd_<channel>`).
-- [ ] Convert existing transcript output into a **canonical format**:
+- [x] Introduce a stable `session_id` (e.g., `YYYYMMDD_dnd_<channel>`).
+- [x] Convert existing transcript output into a **canonical format**:
   - One JSONL file per segment (`turns.jsonl`).
   - Fields: `session_id`, `segment_id`, `speaker_label`, `t_start`, `t_end`, `text`.
-- [ ] Store sessions on disk as:
+- [x] Store sessions on disk as:
   sessions/<session_id>/
   segments/
   summaries/
@@ -87,11 +74,11 @@ I need to create a copy of the bot that uses open source software instead of Azu
 
 ## 2. Stand Up a Vector Database (RAG Core)
 
-- [ ] Choose and deploy a local vector DB (I think I'll go with Qdrant).
-- [ ] Define two embedding corpora:
+- [x] Choose and deploy a local vector DB (I think I'll go with Qdrant).
+- [x] Define two embedding corpora:
 - **Transcripts:** chunked segments or sub-chunks.
 - **Obsidian notes:** chunked by heading/section.
-- [ ] Store metadata with each embedding:
+- [x] Store metadata with each embedding:
 - `type = transcript | obsidian | summary`
 - `session_id`, `speaker_labels`, `tags`, `source_path`.
 
@@ -101,12 +88,12 @@ I need to create a copy of the bot that uses open source software instead of Azu
 
 ## 3. Local LLM Serving in Docker
 
-- [ ] Deploy a single local LLM behind an HTTP API (vLLM / TGI / llama.cpp). (I'll probably use llama.cpp if I'm planning on using a llama based model, I'll probably go with Llama 3.1 8B).
-- [ ] Ensure quantization fits comfortably in 24 GB VRAM.
-- [ ] Validate:
+- [x] Deploy a single local LLM behind an HTTP API (vLLM / TGI / llama.cpp). (I'll probably use llama.cpp if I'm planning on using a llama based model, I'll probably go with Llama 3.1 8B).
+- [x] Ensure quantization fits comfortably in 24 GB VRAM.
+- [x] Validate:
 - Stable responses
 - Acceptable latency for batch summarization
-- [ ] Treat long context as optional; default to chunked input.
+- [x] Treat long context as optional; default to chunked input.
 
 **Why:** Summarization quality > raw context size.
 
@@ -114,7 +101,8 @@ I need to create a copy of the bot that uses open source software instead of Azu
 
 ## 4. Precision-First Summarization Pipeline
 
-### Map Step (per chunk)
+- [x] Replace `summarize` placeholder with:
+- retrieval → map → reduce → persistence
 - [ ] Input to LLM:
 - Transcript chunk
 - Top-k retrieved Obsidian notes
@@ -233,9 +221,7 @@ readback.meta.json
 - [x] Deploy vector DB and index:
 - transcripts
 - Obsidian vault
-- [ ] Replace `summarize` placeholder with:
+- [x] Replace `summarize` placeholder with:
 - retrieval → map → reduce → persistence
-- [ ] Verify one full session produces a usable summary.
-- [ ] Implement summarization pipeline using vector DB.
-
----
+- [x] Verify one full session produces a usable summary.
+- [x] Implement summarization pipeline using vector DB.
