@@ -160,7 +160,7 @@ class VoiceRecorder(commands.Cog):
         await ctx.send("Stop recording command invoked!")
         self.recording = False
         print("Writing transcription")
-        await self.write_transcription_offline() # Hanging somewhere in this file I think
+        await self.write_transcription_offline()
         await ctx.send("Stopped recording and saved transcript.")
 
     async def write_transcription_offline(self):
@@ -209,14 +209,16 @@ class VoiceRecorder(commands.Cog):
         vector_db = VectorDB()
 
         # 2. Index transcripts and Obsidian vault
+        await ctx.send("Indexing transcripts.")
         vector_db.index_transcripts()
         obsidian_vault_path = config.get("OBSIDIAN_VAULT_PATH")
         if obsidian_vault_path:
             vector_db.index_obsidian_vault(obsidian_vault_path)
         else:
-            await ctx.send("Obsidian vault path not configured. Skipping Obsidian context.")
+            await ctx.send("Obsidian vault path not configured. Skipping Obsidian context.") # The path for the vault is not currently being found
 
         # 3. Consolidate current session's transcript
+        await ctx.send("Consolidating transcripts.")
         if not self.transcripts:
             await ctx.send("No transcript to summarize.")
             return
@@ -226,29 +228,61 @@ class VoiceRecorder(commands.Cog):
             consolidated_transcript += f"User {segment['speaker_label']}: {segment['text']}\n"
 
         # 4. Retrieve relevant notes from Obsidian vault
-        search_results = vector_db.search(consolidated_transcript)
+        await ctx.send("Retrieving relevant notes...")
+        try:
+            query_text = consolidated_transcript[-6000:]
+            search_results = await asyncio.wait_for(
+                asyncio.to_thread(vector_db.search, query_text, 10),
+                timeout=30.0,
+            )
+        except Exception as e:
+            # This is the part you’re missing right now; you’re likely hitting here.
+            await ctx.send(f"RAG retrieval failed: {type(e).__name__}: {e}")
+            raise  # also re-raise so it shows in docker logs
+
         relevant_notes = ""
+        await ctx.send(f"Num search results: {len(search_results)}")
         for hit in search_results:
             if hit.payload.get('source'):
                 relevant_notes += hit.payload['text'] + "\n\n"
 
         # 5. Construct prompt for local LLM
+        await ctx.send("Constructing prompt for local LLM.")
         context = f"""Relevant Notes from Obsidian:\n{relevant_notes}\n\n"""
         prompt = f"""Using the following context, please summarize the transcript.\n\nContext:\n{context}\n\nTranscript:\n{consolidated_transcript}"""
 
         # 6. Send prompt to local LLM API
+        await ctx.send("Sending prompt to local LLM.")
         try:
-            response = requests.post("http://localhost:8080/summarize", json={"text": prompt})
-            if response.status_code == 200:
-                summary = response.json()["summary"]
-            else:
-                summary = f"Error: Could not get summary from local LLM. Status code: {response.status_code}"
+            payload = {
+                "model": "llama3.1:8b",
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.2,
+                    "num_ctx": 8192
+                }
+            }
+
+            resp = requests.post(
+                "http://ollama:11434/api/generate",
+                json=payload,
+                timeout=180,
+            )
+            resp.raise_for_status()
+
+            data = resp.json()
+            summary = data.get("response", "").strip()
+            if not summary:
+                summary = "Error: LLM returned an empty response."
+
         except requests.exceptions.RequestException as e:
             summary = f"Error: Could not connect to local LLM: {e}"
+        except ValueError as e:
+            summary = f"Error: Could not parse LLM JSON response: {e}"
 
         await ctx.send(f"**Summary:**\n{summary}")
         await self.post_summary(ctx, summary)
-
 
     async def post_summary(self, ctx, summary):
         """
@@ -272,6 +306,8 @@ class VoiceRecorder(commands.Cog):
         # --- END PSEUDOCODE ---
 
         await ctx.send("This is a placeholder for posting the summary to a channel.")
+        if summary is not None:
+            await ctx.send(summary)
 
     @commands.command()
     async def read_summary(self, ctx):

@@ -2,7 +2,7 @@
 import json
 import os
 import uuid
-from qdrant_client.http import QdrantClient, models
+from qdrant_client import QdrantClient, models
 from sentence_transformers import SentenceTransformer
 
 class VectorDB:
@@ -72,13 +72,37 @@ class VectorDB:
                     print(f"Indexed Obsidian note: {file_path}")
 
     def search(self, query_text, limit=5):
+        query_text = (query_text or "").strip()
+        if not query_text:
+            return []
+
+        # Embedding large text is slow and low-quality for retrieval.
+        # Keep query bounded even if caller forgets.
+        query_text = query_text[:6000]
+
         query_vector = self.model.encode(query_text).tolist()
-        hits = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=query_vector,
-            limit=limit
-        )
-        return hits
+
+        # qdrant-client newer versions: use query_points()
+        if hasattr(self.client, "query_points"):
+            res = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_vector,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+            return getattr(res, "points", res)
+
+        # Older clients: fallback to client.search()
+        if hasattr(self.client, "search"):
+            return self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                limit=limit,
+                with_payload=True,
+            )
+
+        raise AttributeError("QdrantClient has neither query_points nor search; incompatible qdrant-client version.")
 
 if __name__ == '__main__':
     # Example usage

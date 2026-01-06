@@ -3,6 +3,8 @@ config.json
 recordings/*.wav
 recordings/archive/*.wav
 
+__pycache__/
+
 sessions/
 
 whisper_cache/
