@@ -1,7 +1,7 @@
 {
     "DISCORD_BOT_TOKEN": "",
-    "BOT_PREFIX": "",
-    "SPECIAL_PERMISSIONS_ROLE": "",
+    "BOT_PREFIX": "!",
+    "SPECIAL_PERMISSIONS_ROLE": "admin",
     
     "AZURE_STORAGE_CONNECTION_STRING": "",
     "AZURE_STORAGE_CONTAINER_NAME": "",
@@ -12,6 +12,11 @@
     "AZURE_OPENAI_ENDPOINT": "",
 
     "OBSIDIAN_VAULT_PATH": "/path/to/your/obsidian/vault",
+
+    "WHISPER_MODEL": "",
+    "WHISPER_MODEL_INSTANCES": 1,
+
+    "SUMMARY_CHANNEL_ID": "",
 
     "FFMPEG_PATH": ""
 }
