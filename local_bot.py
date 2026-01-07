@@ -11,6 +11,8 @@ from pydub import AudioSegment
 from vector_db import VectorDB
 import requests
 import whisper
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 # Load configuration from config.json
 def load_config():
@@ -146,7 +148,7 @@ class VoiceRecorder(commands.Cog):
             await ctx.send("Not connected to any voice channel.")
 
     @commands.command()
-    async def start_recording(self, ctx):
+    async def start_recording(self, ctx): # I believe this is depreciated now
         print("Start recording command invoked")
         await ctx.send("Start recording command invoked")
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
@@ -213,9 +215,9 @@ class VoiceRecorder(commands.Cog):
         vector_db.index_transcripts()
         obsidian_vault_path = config.get("OBSIDIAN_VAULT_PATH")
         if obsidian_vault_path:
-            vector_db.index_obsidian_vault(obsidian_vault_path)
+            vector_db.index_obsidian_vault(obsidian_vault_path) #
         else:
-            await ctx.send("Obsidian vault path not configured. Skipping Obsidian context.") # The path for the vault is not currently being found
+            await ctx.send("Obsidian vault path not configured. Skipping Obsidian context.") # The path for the vault is not currently being found. This is prob b/c it doesn't exist within the docker container.
 
         # 3. Consolidate current session's transcript
         await ctx.send("Consolidating transcripts.")
@@ -242,11 +244,11 @@ class VoiceRecorder(commands.Cog):
 
         relevant_notes = ""
         await ctx.send(f"Num search results: {len(search_results)}")
-        for hit in search_results:
+        for hit in search_results: # We should only grab the top couple results, not all of them. 
             if hit.payload.get('source'):
                 relevant_notes += hit.payload['text'] + "\n\n"
 
-        # 5. Construct prompt for local LLM
+        # 5. Construct prompt for local LLM, still need to implement chunking.
         await ctx.send("Constructing prompt for local LLM.")
         context = f"""Relevant Notes from Obsidian:\n{relevant_notes}\n\n"""
         prompt = f"""Using the following context, please summarize the transcript.\n\nContext:\n{context}\n\nTranscript:\n{consolidated_transcript}"""
@@ -281,7 +283,7 @@ class VoiceRecorder(commands.Cog):
         except ValueError as e:
             summary = f"Error: Could not parse LLM JSON response: {e}"
 
-        await ctx.send(f"**Summary:**\n{summary}")
+        await ctx.send(f"**Summary:**\n{summary}") # Will remove this once I know that the post summary function works.
         await self.post_summary(ctx, summary)
 
     async def post_summary(self, ctx, summary):
@@ -289,25 +291,15 @@ class VoiceRecorder(commands.Cog):
         Posts the summary to a specific Discord channel.
         This is a placeholder for the actual implementation.
         """
-        # --- PSEUDOCODE FOR DISCORD POSTING ---
-        # 1. Get the channel object where you want to post the summary.
-        #    - You could get the channel ID from your config file.
-        #    - Or, you could have a command that sets the channel.
-        #
-        # channel_id = config.get("SUMMARY_CHANNEL_ID")
-        # if channel_id:
-        #     channel = self.bot.get_channel(channel_id)
-        #     if channel:
-        #         await channel.send(f"**Meeting Summary:**\n\n{summary}")
-        #     else:
-        #         await ctx.send("Summary channel not found.")
-        # else:
-        #     await ctx.send("No summary channel configured.")
-        # --- END PSEUDOCODE ---
-
-        await ctx.send("This is a placeholder for posting the summary to a channel.")
-        if summary is not None:
-            await ctx.send(summary)
+        channel_id = config.get("SUMMARY_CHANNEL_ID")
+        if channel_id:
+            channel = self.bot.get_channel(channel_id)
+            if channel:
+                await channel.send(f"**Meeting Summary:**\n\n{summary}")
+            else:
+                await ctx.send("Summary channel not found.")
+        else:
+            await ctx.send("No summary channel configured.")
 
     @commands.command()
     async def read_summary(self, ctx):
