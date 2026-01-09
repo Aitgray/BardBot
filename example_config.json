@@ -18,5 +18,12 @@
 
     "SUMMARY_CHANNEL_ID": "",
 
-    "FFMPEG_PATH": ""
+    "FFMPEG_PATH": "",
+
+    "CHUNK_WINDOW_SECONDS": 30,
+    "CHUNK_OVERLAP_SECONDS": 5,
+    "CHUNK_MIN_FLUSH_SECONDS": 3,
+
+    "RAG_TOP_K": 4,
+    "RAG_SCORE_THRESHOLD": null
 }
