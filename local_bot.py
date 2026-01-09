@@ -29,39 +29,145 @@ intents.voice_states = True  # Enable voice state intents
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+@dataclass
+class AudioChunk:
+    user_id: int
+    chunk_index: int
+    pcm: bytes
+    t_start: float
+    t_end: float
+
 class TranscriptionSink(voice_recv.BasicSink):
-    def __init__(self, callback, *, whisper_model_name: str = "small.en"):
+    """
+    Buffers incoming PCM per-user, slices it into rolling windows (with overlap),
+    and transcribes the resulting chunks on flush.
+
+    This avoids huge per-user WAVs and produces timestamped transcript segments.
+    """
+
+    # Discord voice recv in your code: 48kHz, 16-bit, stereo
+    SAMPLE_RATE = 48000
+    CHANNELS = 2
+    SAMPLE_WIDTH = 2  # bytes per sample per channel
+
+    def __init__(
+        self,
+        *,
+        whisper_model_name: str = "small.en",
+        window_seconds: float = 30.0,
+        overlap_seconds: float = 5.0,
+        min_flush_seconds: float = 3.0,
+    ):
         super().__init__(self.process_audio)
-        self.callback = callback
-        self.audio_data: dict[int, io.BytesIO] = {}
+
         self.whisper_model_name = whisper_model_name
         self.whisper_model = whisper.load_model(self.whisper_model_name, device="cuda")
 
+        self.window_seconds = float(window_seconds)
+        self.overlap_seconds = float(overlap_seconds)
+        self.min_flush_seconds = float(min_flush_seconds)
+
+        self._bytes_per_second = self.SAMPLE_RATE * self.CHANNELS * self.SAMPLE_WIDTH
+        self._window_bytes = int(self._bytes_per_second * self.window_seconds)
+        self._overlap_bytes = int(self._bytes_per_second * self.overlap_seconds)
+        self._min_flush_bytes = int(self._bytes_per_second * self.min_flush_seconds)
+
+        # Per-user rolling buffers and emitted chunks
+        self._buffers: Dict[int, bytearray] = {}
+        self._chunk_counts: Dict[int, int] = {}
+        self._emitted: List[AudioChunk] = []
+
+        # Set when recording begins (passed in by caller)
+        self.session_start_ts: Optional[float] = None
+
+    def set_session_start(self, ts: float) -> None:
+        self.session_start_ts = ts
+
+    def _duration_seconds(self, n_bytes: int) -> float:
+        return n_bytes / float(self._bytes_per_second)
+
     def process_audio(self, user, data: voice_recv.VoiceData):
-        if user.id not in self.audio_data:
-            self.audio_data[user.id] = io.BytesIO()
-        self.audio_data[user.id].write(data.pcm)
+        """
+        Called by the voice receive client frequently. Must be fast and non-blocking.
+        """
+        uid = user.id
+        buf = self._buffers.setdefault(uid, bytearray())
+        buf.extend(data.pcm)
+
+        # Emit chunks while we have at least one full window
+        while len(buf) >= self._window_bytes:
+            idx = self._chunk_counts.get(uid, 0) + 1
+            self._chunk_counts[uid] = idx
+
+            chunk_pcm = bytes(buf[:self._window_bytes])
+
+            # Compute approximate timestamps based on cumulative audio emitted per user
+            # (This is not perfect diarization timing, but it's consistent and useful.)
+            if self.session_start_ts is None:
+                base = time.time()
+            else:
+                base = self.session_start_ts
+
+            # Total seconds emitted for this user before this chunk:
+            emitted_seconds = (idx - 1) * (self.window_seconds - self.overlap_seconds)
+            t_start = base + emitted_seconds
+            t_end = t_start + self.window_seconds
+
+            self._emitted.append(AudioChunk(
+                user_id=uid,
+                chunk_index=idx,
+                pcm=chunk_pcm,
+                t_start=t_start,
+                t_end=t_end
+            ))
+
+            # Keep overlap + any remaining tail in buffer
+            keep_from = max(0, self._window_bytes - self._overlap_bytes)
+            buf[:] = buf[keep_from:]
 
     def flush_and_transcribe(self, session_dir: str) -> list[dict]:
-        segments: list[dict] = []
-
+        """
+        Called when recording stops. Writes WAVs and transcribes each chunk.
+        """
         recordings_dir = os.path.join(session_dir, "recordings")
         os.makedirs(recordings_dir, exist_ok=True)
 
-        now = time.time()
-        seg_id = 1
-        for user_id, buf in self.audio_data.items():
-            pcm = buf.getvalue()
-            if not pcm:
-                continue
+        # Include any final remainder per user (if long enough)
+        for uid, buf in self._buffers.items():
+            if len(buf) >= self._min_flush_bytes:
+                idx = self._chunk_counts.get(uid, 0) + 1
+                self._chunk_counts[uid] = idx
 
+                if self.session_start_ts is None:
+                    base = time.time()
+                else:
+                    base = self.session_start_ts
+
+                emitted_seconds = (idx - 1) * (self.window_seconds - self.overlap_seconds)
+                t_start = base + emitted_seconds
+                t_end = t_start + self._duration_seconds(len(buf))
+
+                self._emitted.append(AudioChunk(
+                    user_id=uid,
+                    chunk_index=idx,
+                    pcm=bytes(buf),
+                    t_start=t_start,
+                    t_end=t_end
+                ))
+
+        segments: list[dict] = []
+        seg_id = 1
+
+        # Transcribe in the order chunks were emitted
+        for ch in self._emitted:
             audio_segment = AudioSegment.from_raw(
-                io.BytesIO(pcm),
-                sample_width=2,
-                frame_rate=48000,
-                channels=2
+                io.BytesIO(ch.pcm),
+                sample_width=self.SAMPLE_WIDTH,
+                frame_rate=self.SAMPLE_RATE,
+                channels=self.CHANNELS
             )
-            wav_path = os.path.join(recordings_dir, f"{user_id}.wav")
+
+            wav_path = os.path.join(recordings_dir, f"{ch.user_id}_{ch.chunk_index:04d}.wav")
             audio_segment.export(wav_path, format="wav")
 
             result = self.whisper_model.transcribe(
@@ -77,15 +183,19 @@ class TranscriptionSink(voice_recv.BasicSink):
             segments.append({
                 "session_id": None,
                 "segment_id": seg_id,
-                "speaker_label": str(user_id),
-                "t_start": now,
-                "t_end": now,
+                "speaker_label": str(ch.user_id),
+                "t_start": ch.t_start,
+                "t_end": ch.t_end,
                 "text": text,
                 "audio_path": wav_path
             })
             seg_id += 1
 
-        self.audio_data = {}
+        # Reset internal state for next session
+        self._buffers.clear()
+        self._chunk_counts.clear()
+        self._emitted.clear()
+
         return segments
 
 class VoiceRecorder(commands.Cog):
@@ -94,43 +204,30 @@ class VoiceRecorder(commands.Cog):
         self.voice_client = None
         self.recording = False
         self.session_id = None
+        self.session_start_ts = None
         self.transcripts = []
         self.sink: TranscriptionSink | None = None
 
-    def transcription_callback(self, user_id, text):
-        if self.recording:
-            timestamp = time.time()
-            segment = {
-                "session_id": self.session_id,
-                "segment_id": len(self.transcripts) + 1,
-                "speaker_label": str(user_id),
-                "t_start": timestamp,
-                "t_end": timestamp, # Note: This is a simplification. For more accurate t_end, we would need more sophisticated logic.
-                "text": text,
-            }
-            self.transcripts.append(segment)
-            print(f"User {user_id}: {text}")
-
     @commands.command()
     async def join(self, ctx):
-        await ctx.send(f"Author is in a voice channel: {ctx.author.voice.channel.name}")
+        if not ctx.author.voice or not ctx.author.voice.channel:
+            await ctx.send("You must be in a voice channel first.")
+            return
+
         try:
             self.voice_client = await ctx.author.voice.channel.connect(cls=voice_recv.VoiceRecvClient)
-            # Initialize sink once per connection.
-            # Uses local Whisper small.en; no per-chunk recognize_whisper() calls.
             model_name = config.get("WHISPER_MODEL", "small.en")
-            self.sink = TranscriptionSink(self.transcription_callback, whisper_model_name=model_name)
+
+            self.sink = TranscriptionSink(
+                whisper_model_name=model_name,
+                window_seconds=config.get("CHUNK_WINDOW_SECONDS", 30.0),
+                overlap_seconds=config.get("CHUNK_OVERLAP_SECONDS", 5.0),
+                min_flush_seconds=config.get("CHUNK_MIN_FLUSH_SECONDS", 3.0),
+            )
             self.voice_client.listen(self.sink)
-            print("Connected to the voice channel and listening for transcriptions.")
-            await ctx.send("Connected to the voice channel and listening for transcriptions.")
+            await ctx.send("Connected and listening. Use !start_recording to begin.")
         except Exception as e:
-            print(f"Failed to connect to the voice channel: {e}")
-            await ctx.send(f"Failed to connect to the voice channel: {e}")
-        await ctx.send("Start recording command invoked")
-        self.session_id = time.strftime("%Y%m%d-%H%M%S")
-        self.recording = True
-        self.transcripts = []
-        await ctx.send("Started recording.")
+            await ctx.send(f"Failed to connect: {e}")
 
     @commands.command()
     async def leave(self, ctx):
@@ -148,20 +245,29 @@ class VoiceRecorder(commands.Cog):
             await ctx.send("Not connected to any voice channel.")
 
     @commands.command()
-    async def start_recording(self, ctx): # I believe this is depreciated now
-        print("Start recording command invoked")
-        await ctx.send("Start recording command invoked")
+    async def start_recording(self, ctx):
+        if not self.voice_client or not self.voice_client.is_connected():
+            await ctx.send("Not connected. Use !join first.")
+            return
+        if not self.sink:
+            await ctx.send("No sink available; reconnect with !join.")
+            return
+
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
+        self.session_start_ts = time.time()
+        self.sink.set_session_start(self.session_start_ts)
+
         self.recording = True
         self.transcripts = []
-        await ctx.send("Started recording.")
+        await ctx.send(f"Started recording. Session: {self.session_id}")
 
     @commands.command()
     async def stop_recording(self, ctx):
-        print("Stop recording command invoked!")
-        await ctx.send("Stop recording command invoked!")
+        if not self.recording:
+            await ctx.send("Not currently recording.")
+            return
+
         self.recording = False
-        print("Writing transcription")
         await self.write_transcription_offline()
         await ctx.send("Stopped recording and saved transcript.")
 
@@ -202,25 +308,21 @@ class VoiceRecorder(commands.Cog):
 
     @commands.command()
     async def summarize(self, ctx):
-        """
-        Summarizes the transcriptions using a local LLM with RAG.
-        """
         await ctx.send("Summarizing transcript... this may take a moment.")
 
-        # 1. Initialize VectorDB
         vector_db = VectorDB()
 
-        # 2. Index transcripts and Obsidian vault
-        await ctx.send("Indexing transcripts.")
+        # Indexing: ideally, index obsidian once at startup, but leaving as-is for now
+        # Right now Obsidian won't be indexed b/c I'm running in a docker container and the notes aren't copied over.
+        # In the future I may want to add the Obsidian notes to a volume, if I get the notes to sync with github maybe I can pull any updates on startup?
+        # That way I could also theoretically push all the summaries that are generated to my Vault automatically
         vector_db.index_transcripts()
         obsidian_vault_path = config.get("OBSIDIAN_VAULT_PATH")
         if obsidian_vault_path:
-            vector_db.index_obsidian_vault(obsidian_vault_path) #
+            vector_db.index_obsidian_vault(obsidian_vault_path)
         else:
-            await ctx.send("Obsidian vault path not configured. Skipping Obsidian context.") # The path for the vault is not currently being found. This is prob b/c it doesn't exist within the docker container.
+            await ctx.send("Obsidian vault path not configured. Skipping Obsidian context.")
 
-        # 3. Consolidate current session's transcript
-        await ctx.send("Consolidating transcripts.")
         if not self.transcripts:
             await ctx.send("No transcript to summarize.")
             return
@@ -229,32 +331,44 @@ class VoiceRecorder(commands.Cog):
         for segment in self.transcripts:
             consolidated_transcript += f"User {segment['speaker_label']}: {segment['text']}\n"
 
-        # 4. Retrieve relevant notes from Obsidian vault
-        await ctx.send("Retrieving relevant notes...")
-        try:
-            query_text = consolidated_transcript[-6000:]
-            search_results = await asyncio.wait_for(
-                asyncio.to_thread(vector_db.search, query_text, 10),
-                timeout=30.0,
-            )
-        except Exception as e:
-            # This is the part you’re missing right now; you’re likely hitting here.
-            await ctx.send(f"RAG retrieval failed: {type(e).__name__}: {e}")
-            raise  # also re-raise so it shows in docker logs
+        # Retrieve only top-k notes
+        top_k = int(config.get("RAG_TOP_K", 4))
+        score_threshold = config.get("RAG_SCORE_THRESHOLD")  # optional; may be None
 
-        relevant_notes = ""
-        await ctx.send(f"Num search results: {len(search_results)}")
-        for hit in search_results: # We should only grab the top couple results, not all of them. 
-            if hit.payload.get('source'):
-                relevant_notes += hit.payload['text'] + "\n\n"
+        search_results = vector_db.search(consolidated_transcript)
 
-        # 5. Construct prompt for local LLM, still need to implement chunking.
-        await ctx.send("Constructing prompt for local LLM.")
-        context = f"""Relevant Notes from Obsidian:\n{relevant_notes}\n\n"""
-        prompt = f"""Using the following context, please summarize the transcript.\n\nContext:\n{context}\n\nTranscript:\n{consolidated_transcript}"""
+        # Enforce top-k early
+        search_results = search_results[:top_k]
 
-        # 6. Send prompt to local LLM API
-        await ctx.send("Sending prompt to local LLM.")
+        relevant_notes_parts = []
+        for hit in search_results:
+            # Optional score filtering if your VectorDB hits provide .score
+            if score_threshold is not None and hasattr(hit, "score"):
+                if hit.score < float(score_threshold):
+                    continue
+
+            payload = getattr(hit, "payload", None) or {}
+            if payload.get("source") and payload.get("text"):
+                relevant_notes_parts.append(payload["text"])
+
+        relevant_notes = "\n\n".join(relevant_notes_parts)
+
+        prompt = f"""You are an assistant that summarizes Discord call transcripts.
+    Use the provided context if relevant. If context is irrelevant, ignore it.
+
+    Context (top {top_k} retrieved notes):
+    {relevant_notes}
+
+    Transcript:
+    {consolidated_transcript}
+
+    Write:
+    - A concise summary in markdown
+    - Decisions (if any)
+    - Action items with owners (if any)
+    """
+
+        ctx.send("Sending prompt for local LLM")
         try:
             payload = {
                 "model": "llama3.1:8b",
@@ -262,29 +376,25 @@ class VoiceRecorder(commands.Cog):
                 "stream": False,
                 "options": {
                     "temperature": 0.2,
-                    "num_ctx": 8192
+                    # "num_ctx": 8192 Getting rid of this for now, eventually the transcript needs to be partitioned into chunks but for now I'm just going to send the whole thing
                 }
             }
 
-            resp = requests.post(
-                "http://ollama:11434/api/generate",
+            response = requests.post(
+                "http://ollama:11434/api/generate", 
                 json=payload,
                 timeout=180,
             )
-            resp.raise_for_status()
-
-            data = resp.json()
-            summary = data.get("response", "").strip()
-            if not summary:
-                summary = "Error: LLM returned an empty response."
-
+            if response.status_code == 200:
+                summary = response.json()["summary"]
+                await ctx.send("Summary successfully generated!")
+            else:
+                summary = f"Error: Could not get summary from local LLM. Status code: {response.status_code}"
         except requests.exceptions.RequestException as e:
             summary = f"Error: Could not connect to local LLM: {e}"
-        except ValueError as e:
-            summary = f"Error: Could not parse LLM JSON response: {e}"
-
-        await ctx.send(f"**Summary:**\n{summary}") # Will remove this once I know that the post summary function works.
-        await self.post_summary(ctx, summary)
+        await ctx.send(f"**Summary:**\n{summary}")
+        # I'd love it if the session number was automatically printed as well. 
+        # await self.post_summary(ctx, summary)
 
     async def post_summary(self, ctx, summary):
         """
@@ -295,7 +405,7 @@ class VoiceRecorder(commands.Cog):
         if channel_id:
             channel = self.bot.get_channel(channel_id)
             if channel:
-                await channel.send(f"**Meeting Summary:**\n\n{summary}")
+                await channel.send(f"**Session Summary:**\n\n{summary}")
             else:
                 await ctx.send("Summary channel not found.")
         else:

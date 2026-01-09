@@ -3,7 +3,7 @@ config.json
 recordings/*.wav
 recordings/archive/*.wav
 
-__pycache__/
+*.pyc
 
 sessions/
 
