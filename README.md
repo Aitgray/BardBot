@@ -57,49 +57,7 @@ The `config.json` file is used to configure the bot.
 
 ---
 
-## 1. Normalize and Persist Transcripts (Foundational)
-
-- [x] Introduce a stable `session_id` (e.g., `YYYYMMDD_dnd_<channel>`).
-- [x] Convert existing transcript output into a **canonical format**:
-  - One JSONL file per segment (`turns.jsonl`).
-  - Fields: `session_id`, `segment_id`, `speaker_label`, `t_start`, `t_end`, `text`.
-- [x] Store sessions on disk as:
-  sessions/<session_id>/
-  segments/
-  summaries/
-  metadata.json
-**Why:** Enables deterministic summarization, reprocessing, and retrieval.
-
----
-
-## 2. Stand Up a Vector Database (RAG Core)
-
-- [x] Choose and deploy a local vector DB (I think I'll go with Qdrant).
-- [x] Define two embedding corpora:
-- **Transcripts:** chunked segments or sub-chunks.
-- **Obsidian notes:** chunked by heading/section.
-- [x] Store metadata with each embedding:
-- `type = transcript | obsidian | summary`
-- `session_id`, `speaker_labels`, `tags`, `source_path`.
-
-**Why:** SQLite is insufficient for semantic retrieval; vector DB is required for RAG.
-
----
-
-## 3. Local LLM Serving in Docker
-
-- [x] Deploy a single local LLM behind an HTTP API (vLLM / TGI / llama.cpp). (I'll probably use llama.cpp if I'm planning on using a llama based model, I'll probably go with Llama 3.1 8B).
-- [x] Ensure quantization fits comfortably in 24 GB VRAM.
-- [x] Validate:
-- Stable responses
-- Acceptable latency for batch summarization
-- [x] Treat long context as optional; default to chunked input.
-
-**Why:** Summarization quality > raw context size.
-
----
-
-## 4. Precision-First Summarization Pipeline
+## 1. Precision-First Summarization Pipeline
 
 - [x] Replace `summarize` placeholder with:
 - retrieval → map → reduce → persistence
@@ -125,7 +83,7 @@ The `config.json` file is used to configure the bot.
 
 ---
 
-## 5. Multi-Model Ensemble (Optional but Recommended)
+## 1. Multi-Model Ensemble (Optional but Recommended)
 
 - [ ] Run 2–3 **writer passes** with different prompt profiles:
 - Factual
@@ -145,7 +103,7 @@ The `config.json` file is used to configure the bot.
 
 ---
 
-## 6. RAG Tooling / MCP-Style Integration
+## 3. RAG Tooling / MCP-Style Integration
 
 - [ ] Expose retrieval as explicit tools:
 - `retrieve_transcript_chunks(query)`
@@ -157,9 +115,9 @@ The `config.json` file is used to configure the bot.
 
 ---
 
-## 7. TTS Readback (Generate Post-Summarization, Play Pre-Session)
+## 4. TTS Readback (Generate Post-Summarization, Play Pre-Session)
 
-### 7.1 Generate TTS as a post-processing artifact (end of pipeline)
+### 4.1 Generate TTS as a post-processing artifact (end of pipeline)
 - [ ] After the final session summary is produced, generate a **readback script** (either:
   - the first N bullets of the executive recap, or
   - a dedicated “readback” section produced by the LLM).
@@ -177,7 +135,7 @@ readback.meta.json
 
 **Goal:** TTS is “ready-to-play” before the next session begins.
 
-### 7.2 Playback behavior at session start (non-blocking, fail-soft)
+### 4.2 Playback behavior at session start (non-blocking, fail-soft)
 - [ ] On session start command (or when quorum arrives):
 - If `readback.*` exists for the latest completed session: **play immediately**
 - If missing: fall back to **text post in chat** (or play nothing), but **do not block recording**
@@ -185,11 +143,11 @@ readback.meta.json
 - Recording start should be independent of TTS readiness
 - Optionally: start recording first, then play TTS (if you don’t mind it being recorded)
 
-### 7.3 Recording gate logic (choose one)
+### 4.3 Recording gate logic (choose one)
 - [ ] Option A (preferred for clean audio): `PLAY_TTS → START_RECORDING` only if file exists; otherwise start recording immediately.
 - [ ] Option B (always-start): `START_RECORDING → PLAY_TTS` (TTS may be included in the recording, but session never waits).
 
-### 7.4 Operational safeguard
+### 4.4 Operational safeguard
 - [ ] Add a timeout for TTS playback (e.g., stop after X minutes).
 - [ ] Add a manual override command:
 - `!readback` (play audio if present)
@@ -198,7 +156,7 @@ readback.meta.json
 
 ---
 
-## 8. Always-On Deployment + Metrics
+## 5. Always-On Deployment + Metrics
 
 - [ ] Split services:
 - Discord bot (CPU)
@@ -212,16 +170,3 @@ readback.meta.json
 - [ ] Persist metrics as JSONL or lightweight DB.
 
 **Why:** Keeps the bot low-impact and observable.
-
----
-
-## Immediate Next Actions (High Impact)
-
-- [x] Add `session_id` + canonical transcript format.
-- [x] Deploy vector DB and index:
-- transcripts
-- Obsidian vault
-- [x] Replace `summarize` placeholder with:
-- retrieval → map → reduce → persistence
-- [x] Verify one full session produces a usable summary.
-- [x] Implement summarization pipeline using vector DB.
