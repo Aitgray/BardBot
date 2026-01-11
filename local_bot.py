@@ -13,6 +13,10 @@ import requests
 import whisper
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+import math
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import torch
 
 # Load configuration from config.json
 def load_config():
@@ -28,6 +32,34 @@ intents.message_content = True
 intents.voice_states = True  # Enable voice state intents
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ---------------------------
+# Whisper multiprocessing pool
+# ---------------------------
+
+_WORKER_MODEL = None
+_WORKER_DEVICE = None
+
+def _whisper_worker_init(model_name: str):
+    """Initializer for each worker process: load Whisper once per worker."""
+    global _WORKER_MODEL, _WORKER_DEVICE
+
+    _WORKER_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    _WORKER_MODEL = whisper.load_model(model_name, device=_WORKER_DEVICE)
+
+def _whisper_worker_transcribe(args):
+    """Worker task: transcribe a single WAV path."""
+    user_id, wav_path = args
+
+    fp16 = torch.cuda.is_available()
+    result = _WORKER_MODEL.transcribe(
+        wav_path,
+        language="en",
+        fp16=fp16,
+        verbose=False
+    )
+    text = (result.get("text") or "").strip()
+    return user_id, wav_path, text
 
 @dataclass
 class AudioChunk:
@@ -60,9 +92,10 @@ class TranscriptionSink(voice_recv.BasicSink):
     ):
         super().__init__(self.process_audio)
 
+        # Keep: name only (workers load the model later)
         self.whisper_model_name = whisper_model_name
-        self.whisper_model = whisper.load_model(self.whisper_model_name, device="cuda")
 
+        # Keep: windowing configuration
         self.window_seconds = float(window_seconds)
         self.overlap_seconds = float(overlap_seconds)
         self.min_flush_seconds = float(min_flush_seconds)
@@ -72,13 +105,14 @@ class TranscriptionSink(voice_recv.BasicSink):
         self._overlap_bytes = int(self._bytes_per_second * self.overlap_seconds)
         self._min_flush_bytes = int(self._bytes_per_second * self.min_flush_seconds)
 
-        # Per-user rolling buffers and emitted chunks
+        # Keep: buffers + chunk tracking
         self._buffers: Dict[int, bytearray] = {}
         self._chunk_counts: Dict[int, int] = {}
         self._emitted: List[AudioChunk] = []
 
-        # Set when recording begins (passed in by caller)
+        # Keep: timing
         self.session_start_ts: Optional[float] = None
+
 
     def set_session_start(self, ts: float) -> None:
         self.session_start_ts = ts
@@ -126,75 +160,104 @@ class TranscriptionSink(voice_recv.BasicSink):
             buf[:] = buf[keep_from:]
 
     def flush_and_transcribe(self, session_dir: str) -> list[dict]:
-        """
-        Called when recording stops. Writes WAVs and transcribes each chunk.
-        """
+        segments: list[dict] = []
+
         recordings_dir = os.path.join(session_dir, "recordings")
         os.makedirs(recordings_dir, exist_ok=True)
 
-        # Include any final remainder per user (if long enough)
-        for uid, buf in self._buffers.items():
-            if len(buf) >= self._min_flush_bytes:
-                idx = self._chunk_counts.get(uid, 0) + 1
-                self._chunk_counts[uid] = idx
-
-                if self.session_start_ts is None:
-                    base = time.time()
-                else:
-                    base = self.session_start_ts
-
-                emitted_seconds = (idx - 1) * (self.window_seconds - self.overlap_seconds)
-                t_start = base + emitted_seconds
-                t_end = t_start + self._duration_seconds(len(buf))
-
-                self._emitted.append(AudioChunk(
-                    user_id=uid,
-                    chunk_index=idx,
-                    pcm=bytes(buf),
-                    t_start=t_start,
-                    t_end=t_end
-                ))
-
-        segments: list[dict] = []
+        now = time.time()
         seg_id = 1
 
-        # Transcribe in the order chunks were emitted
-        for ch in self._emitted:
-            audio_segment = AudioSegment.from_raw(
-                io.BytesIO(ch.pcm),
-                sample_width=self.SAMPLE_WIDTH,
-                frame_rate=self.SAMPLE_RATE,
-                channels=self.CHANNELS
-            )
-
-            wav_path = os.path.join(recordings_dir, f"{ch.user_id}_{ch.chunk_index:04d}.wav")
-            audio_segment.export(wav_path, format="wav")
-
-            result = self.whisper_model.transcribe(
-                wav_path,
-                language="en",
-                fp16=True,
-                verbose=False
-            )
-            text = (result.get("text") or "").strip()
-            if not text:
+        # 1) Export WAVs first (fast)
+        jobs = []
+        for user_id, buf in self.audio_data.items():
+            pcm = buf.getvalue()
+            if not pcm:
                 continue
 
-            segments.append({
-                "session_id": None,
-                "segment_id": seg_id,
-                "speaker_label": str(ch.user_id),
-                "t_start": ch.t_start,
-                "t_end": ch.t_end,
-                "text": text,
-                "audio_path": wav_path
-            })
-            seg_id += 1
+            audio_segment = AudioSegment.from_raw(
+                io.BytesIO(pcm),
+                sample_width=2,
+                frame_rate=48000,
+                channels=2
+            )
 
-        # Reset internal state for next session
-        self._buffers.clear()
-        self._chunk_counts.clear()
-        self._emitted.clear()
+            wav_path = os.path.join(recordings_dir, f"{user_id}.wav")
+            audio_segment.export(wav_path, format="wav")
+            jobs.append((user_id, wav_path))
+
+        # Clear buffers early to free memory
+        self.audio_data = {}
+
+        if not jobs:
+            return []
+
+        # 2) Decide worker count
+        model_vram_gb = float(config.get("WHISPER_MODEL_VRAM_GB", 2.0))  # your estimate
+        vram_fraction = float(config.get("WHISPER_VRAM_FRACTION", 0.50))  # e.g., 0.5 uses 50% VRAM
+        max_workers_cfg = int(config.get("WHISPER_MAX_WORKERS", 0))  # 0 = auto
+
+        workers = 1
+        if torch.cuda.is_available():
+            total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            auto_workers = max(1, int(math.floor((total_vram_gb * vram_fraction) / model_vram_gb)))
+            workers = auto_workers
+        else:
+            workers = 1  # CPU mode: do not parallelize by default
+
+        if max_workers_cfg > 0:
+            workers = min(workers, max_workers_cfg)
+
+        workers = min(workers, len(jobs))  # never more workers than jobs
+
+        logging.info("Whisper transcription: jobs=%d workers=%d cuda=%s",
+                    len(jobs), workers, torch.cuda.is_available())
+
+        # 3) Transcribe in parallel (one model per worker)
+        # Use spawn context for CUDA safety.
+        ctx = mp.get_context("spawn")
+
+        if workers == 1:
+            # Single-worker fallback (still uses worker initializer to keep behavior identical)
+            _whisper_worker_init(self.whisper_model_name)
+            for user_id, wav_path in jobs:
+                user_id, wav_path, text = _whisper_worker_transcribe((user_id, wav_path))
+                if not text:
+                    continue
+                segments.append({
+                    "session_id": None,
+                    "segment_id": seg_id,
+                    "speaker_label": str(user_id),
+                    "t_start": now,
+                    "t_end": now,
+                    "text": text,
+                    "audio_path": wav_path
+                })
+                seg_id += 1
+            return segments
+
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=ctx,
+            initializer=_whisper_worker_init,
+            initargs=(self.whisper_model_name,),
+        ) as ex:
+            futures = [ex.submit(_whisper_worker_transcribe, job) for job in jobs]
+
+            for fut in as_completed(futures):
+                user_id, wav_path, text = fut.result()
+                if not text:
+                    continue
+                segments.append({
+                    "session_id": None,
+                    "segment_id": seg_id,
+                    "speaker_label": str(user_id),
+                    "t_start": now,
+                    "t_end": now,
+                    "text": text,
+                    "audio_path": wav_path
+                })
+                seg_id += 1
 
         return segments
 
@@ -208,13 +271,13 @@ class VoiceRecorder(commands.Cog):
         self.transcripts = []
         self.sink: TranscriptionSink | None = None
 
-    @commands.command()
+    @commands.command() # This didn't work this session, need to investigate why
     async def join(self, ctx):
         if not ctx.author.voice or not ctx.author.voice.channel:
             await ctx.send("You must be in a voice channel first.")
             return
 
-        try:
+        try: # Perhaps I can split this onto a seperate thread, and have it write every time it performs a transcription.
             self.voice_client = await ctx.author.voice.channel.connect(cls=voice_recv.VoiceRecvClient)
             model_name = config.get("WHISPER_MODEL", "small.en")
 
