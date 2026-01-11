@@ -16,6 +16,7 @@ services:
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: llama3.1:8b
+      TZ: America/Los_Angeles
     volumes:
       - ./:/app
       - ./whisper_cache:/root/.cache/whisper
