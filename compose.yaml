@@ -7,21 +7,63 @@ services:
     volumes:
       - ollama:/root/.ollama
     gpus: all
+    restart: unless-stopped
+
+  vault_sync:
+    image: alpine:3.19
+    container_name: vault_sync
+    environment:
+      VAULT_REPO_URL: ${VAULT_REPO_URL}
+      VAULT_BRANCH: ${VAULT_BRANCH:-main}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-43200}
+      TZ: America/Los_Angeles
+    volumes:
+      - obsidian_vault:/vault
+
+      # SSH key and config are mounted from host paths defined in .env
+      - ${VAULT_SSH_KEY_PATH}:/root/.ssh/id_ed25519:ro
+      - ${VAULT_SSH_CONFIG_PATH}:/root/.ssh/config:ro
+      - ${VAULT_KNOWN_HOSTS_PATH}:/root/.ssh/known_hosts:ro
+    entrypoint: ["/bin/sh", "-lc"]
+    command: >
+      set -e;
+      apk add --no-cache git openssh-client ca-certificates;
+      chmod 700 /root/.ssh || true;
+      chmod 600 /root/.ssh/id_ed25519 || true;
+      if [ ! -d /vault/.git ]; then
+        echo "[vault_sync] Vault not initialized; cloning...";
+        rm -rf /vault/*;
+        git clone --branch "$VAULT_BRANCH" "$VAULT_REPO_URL" /vault;
+      fi;
+      while true; do
+        echo "[vault_sync] Syncing vault...";
+        cd /vault;
+        git fetch --all --prune;
+        git reset --hard "origin/$VAULT_BRANCH";
+        date -Iseconds > /vault/.last_sync;
+        echo "[vault_sync] Sync complete. Sleeping...";
+        sleep "$SYNC_INTERVAL_SECONDS";
+      done
+    restart: unless-stopped
 
   bardbot:
     build: .
     container_name: bardbot
     depends_on:
       - ollama
+      - vault_sync
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_MODEL: llama3.1:8b
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
       TZ: America/Los_Angeles
+      OBSIDIAN_VAULT_PATH: /vault
     volumes:
       - ./:/app
       - ./whisper_cache:/root/.cache/whisper
+      - obsidian_vault:/vault:ro
     gpus: all
+    restart: unless-stopped
 
 volumes:
   ollama:
-
+  obsidian_vault:
