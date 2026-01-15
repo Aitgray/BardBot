@@ -5,6 +5,8 @@ recordings/archive/*.wav
 
 *.pyc
 
+.env
+
 sessions/
 
 whisper_cache/
