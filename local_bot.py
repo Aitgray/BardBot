@@ -146,40 +146,43 @@ class TranscriptionSink(voice_recv.BasicSink):
             self.audio_data[user.id] = buf_io
         buf_io.write(data.pcm)
 
-        uid = user.id
-        buf = self._buffers.setdefault(uid, bytearray())
-        buf.extend(data.pcm)
+        try:
+            uid = user.id
+            buf = self._buffers.setdefault(uid, bytearray())
+            buf.extend(data.pcm)
 
-        # Emit chunks while we have at least one full window
-        while len(buf) >= self._window_bytes:
-            idx = self._chunk_counts.get(uid, 0) + 1
-            self._chunk_counts[uid] = idx
+            # Emit chunks while we have at least one full window
+            while len(buf) >= self._window_bytes:
+                idx = self._chunk_counts.get(uid, 0) + 1
+                self._chunk_counts[uid] = idx
 
-            chunk_pcm = bytes(buf[:self._window_bytes])
+                chunk_pcm = bytes(buf[:self._window_bytes])
 
-            # Compute approximate timestamps based on cumulative audio emitted per user
-            # (This is not perfect diarization timing, but it's consistent and useful.)
-            if self.session_start_ts is None:
-                base = time.time()
-            else:
-                base = self.session_start_ts
+                # Compute approximate timestamps based on cumulative audio emitted per user
+                # (This is not perfect diarization timing, but it's consistent and useful.)
+                if self.session_start_ts is None:
+                    base = time.time()
+                else:
+                    base = self.session_start_ts
 
-            # Total seconds emitted for this user before this chunk:
-            emitted_seconds = (idx - 1) * (self.window_seconds - self.overlap_seconds)
-            t_start = base + emitted_seconds
-            t_end = t_start + self.window_seconds
+                # Total seconds emitted for this user before this chunk:
+                emitted_seconds = (idx - 1) * (self.window_seconds - self.overlap_seconds)
+                t_start = base + emitted_seconds
+                t_end = t_start + self.window_seconds
 
-            self._emitted.append(AudioChunk(
-                user_id=uid,
-                chunk_index=idx,
-                pcm=chunk_pcm,
-                t_start=t_start,
-                t_end=t_end
-            ))
+                self._emitted.append(AudioChunk(
+                    user_id=uid,
+                    chunk_index=idx,
+                    pcm=chunk_pcm,
+                    t_start=t_start,
+                    t_end=t_end
+                ))
 
-            # Keep overlap + any remaining tail in buffer
-            keep_from = max(0, self._window_bytes - self._overlap_bytes)
-            buf[:] = buf[keep_from:]
+                # Keep overlap + any remaining tail in buffer
+                keep_from = max(0, self._window_bytes - self._overlap_bytes)
+                buf[:] = buf[keep_from:]
+        except Exception as e:
+            logging.error(f"Error processing audio for user {user}: {e}")
 
     def flush_and_transcribe(self, session_dir: str) -> list[dict]: # The whisper model is always loaded into the main process, causing the entire event loop to get blocked while the model loads/trascribes
         segments: list[dict] = []
@@ -295,12 +298,18 @@ class VoiceRecorder(commands.Cog):
 
     @commands.command() # This didn't work this session, need to investigate why
     async def join(self, ctx):
+        if self.voice_client and self.voice_client.is_connected():
+            await ctx.send("Already connected to a voice channel.")
+            return
         if not ctx.author.voice or not ctx.author.voice.channel:
             await ctx.send("You must be in a voice channel first.")
             return
 
         try: # Perhaps I can split this onto a seperate thread, and have it write every time it performs a transcription.
-            self.voice_client = await ctx.author.voice.channel.connect(cls=voice_recv.VoiceRecvClient)
+            self.voice_client = await ctx.author.voice.channel.connect(
+                cls=voice_recv.VoiceRecvClient,
+                reconnect=False    
+            )
             model_name = config.get("WHISPER_MODEL", "small.en")
 
             self.sink = TranscriptionSink(
