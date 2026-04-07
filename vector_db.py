@@ -58,7 +58,7 @@ class VectorDB:
                         # Simple chunking by paragraph
                         for i, paragraph in enumerate(content.split('\n\n')):
                             if paragraph.strip():
-                                point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_path}-{i}"))
+                                point_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_path}-{i}")
                                 self.client.upsert(
                                     collection_name=self.collection_name,
                                     points=[

@@ -4,9 +4,7 @@ from discord.ext import commands, voice_recv
 import os
 import json
 import time
-import speech_recognition as sr
 import io
-import threading
 from pydub import AudioSegment
 from vector_db import VectorDB
 import requests
@@ -17,10 +15,11 @@ import math
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import torch
+import asyncio
 
 # Load configuration from config.json
 def load_config():
-    with open('config.json', 'r') as f:
+    with open('config.json', 'r') as f: # No error handling for missing config
         return json.load(f)
 
 config = load_config()
@@ -105,6 +104,10 @@ class TranscriptionSink(voice_recv.BasicSink):
         self._overlap_bytes = int(self._bytes_per_second * self.overlap_seconds)
         self._min_flush_bytes = int(self._bytes_per_second * self.min_flush_seconds)
 
+        # Recording gate + raw buffers (full session per user)
+        self.recording = False
+        self.audio_data: Dict[int, io.BytesIO] = {}
+
         # Keep: buffers + chunk tracking
         self._buffers: Dict[int, bytearray] = {}
         self._chunk_counts: Dict[int, int] = {}
@@ -117,6 +120,16 @@ class TranscriptionSink(voice_recv.BasicSink):
     def set_session_start(self, ts: float) -> None:
         self.session_start_ts = ts
 
+    def start_recording(self) -> None:
+        self.recording = True
+        self.audio_data = {}
+        self._buffers = {}
+        self._chunk_counts = {}
+        self._emitted = []
+
+    def stop_recording(self) -> None:
+        self.recording = False
+
     def _duration_seconds(self, n_bytes: int) -> float:
         return n_bytes / float(self._bytes_per_second)
 
@@ -124,6 +137,15 @@ class TranscriptionSink(voice_recv.BasicSink):
         """
         Called by the voice receive client frequently. Must be fast and non-blocking.
         """
+        if not self.recording:
+            return
+
+        buf_io = self.audio_data.get(user.id)
+        if buf_io is None:
+            buf_io = io.BytesIO()
+            self.audio_data[user.id] = buf_io
+        buf_io.write(data.pcm)
+
         uid = user.id
         buf = self._buffers.setdefault(uid, bytearray())
         buf.extend(data.pcm)
@@ -159,7 +181,7 @@ class TranscriptionSink(voice_recv.BasicSink):
             keep_from = max(0, self._window_bytes - self._overlap_bytes)
             buf[:] = buf[keep_from:]
 
-    def flush_and_transcribe(self, session_dir: str) -> list[dict]:
+    def flush_and_transcribe(self, session_dir: str) -> list[dict]: # The whisper model is always loaded into the main process, causing the entire event loop to get blocked while the model loads/trascribes
         segments: list[dict] = []
 
         recordings_dir = os.path.join(session_dir, "recordings")
@@ -170,7 +192,7 @@ class TranscriptionSink(voice_recv.BasicSink):
 
         # 1) Export WAVs first (fast)
         jobs = []
-        for user_id, buf in self.audio_data.items():
+        for user_id, buf in self.audio_data.items(): # 
             pcm = buf.getvalue()
             if not pcm:
                 continue
@@ -228,7 +250,7 @@ class TranscriptionSink(voice_recv.BasicSink):
                     "session_id": None,
                     "segment_id": seg_id,
                     "speaker_label": str(user_id),
-                    "t_start": now,
+                    "t_start": now, # Both start and end are set to now which needs to be fixed.
                     "t_end": now,
                     "text": text,
                     "audio_path": wav_path
@@ -319,6 +341,7 @@ class VoiceRecorder(commands.Cog):
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
         self.session_start_ts = time.time()
         self.sink.set_session_start(self.session_start_ts)
+        self.sink.start_recording()
 
         self.recording = True
         self.transcripts = []
@@ -331,6 +354,8 @@ class VoiceRecorder(commands.Cog):
             return
 
         self.recording = False
+        if self.sink:
+            self.sink.stop_recording()
         await self.write_transcription_offline()
         await ctx.send("Stopped recording and saved transcript.")
 
@@ -373,7 +398,7 @@ class VoiceRecorder(commands.Cog):
     async def summarize(self, ctx):
         await ctx.send("Summarizing transcript... this may take a moment.")
 
-        vector_db = VectorDB()
+        vector_db = VectorDB() # The vecotr database is recreated every time every single time we perform summarization.
 
         # Indexing: ideally, index obsidian once at startup, but leaving as-is for now
         # Right now Obsidian won't be indexed b/c I'm running in a docker container and the notes aren't copied over.
@@ -431,7 +456,7 @@ class VoiceRecorder(commands.Cog):
     - Action items with owners (if any)
     """
 
-        ctx.send("Sending prompt for local LLM")
+        await ctx.send("Sending prompt for local LLM")
         try:
             payload = {
                 "model": "llama3.1:8b",
@@ -449,7 +474,7 @@ class VoiceRecorder(commands.Cog):
                 timeout=180,
             )
             if response.status_code == 200:
-                summary = response.json()["summary"]
+                summary = response.json()["response"]
                 await ctx.send("Summary successfully generated!")
             else:
                 summary = f"Error: Could not get summary from local LLM. Status code: {response.status_code}"
@@ -545,5 +570,4 @@ async def main():
         await bot.start(DISCORD_BOT_TOKEN)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
