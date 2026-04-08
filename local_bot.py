@@ -1,6 +1,6 @@
 import logging
 import discord
-from discord.ext import commands, voice_recv
+from discord.ext import commands
 import os
 import json
 import time
@@ -68,7 +68,7 @@ class AudioChunk:
     t_start: float
     t_end: float
 
-class TranscriptionSink(voice_recv.BasicSink):
+class TranscriptionSink(discord.sinks.Sink):
     """
     Buffers incoming PCM per-user, slices it into rolling windows (with overlap),
     and transcribes the resulting chunks on flush.
@@ -89,12 +89,9 @@ class TranscriptionSink(voice_recv.BasicSink):
         overlap_seconds: float = 5.0,
         min_flush_seconds: float = 3.0,
     ):
-        super().__init__(self.process_audio)
+        super().__init__()
 
-        # Keep: name only (workers load the model later)
         self.whisper_model_name = whisper_model_name
-
-        # Keep: windowing configuration
         self.window_seconds = float(window_seconds)
         self.overlap_seconds = float(overlap_seconds)
         self.min_flush_seconds = float(min_flush_seconds)
@@ -104,66 +101,52 @@ class TranscriptionSink(voice_recv.BasicSink):
         self._overlap_bytes = int(self._bytes_per_second * self.overlap_seconds)
         self._min_flush_bytes = int(self._bytes_per_second * self.min_flush_seconds)
 
-        # Recording gate + raw buffers (full session per user)
-        self.recording = False
         self.audio_data: Dict[int, io.BytesIO] = {}
-
-        # Keep: buffers + chunk tracking
         self._buffers: Dict[int, bytearray] = {}
         self._chunk_counts: Dict[int, int] = {}
         self._emitted: List[AudioChunk] = []
-
-        # Keep: timing
         self.session_start_ts: Optional[float] = None
 
 
     def set_session_start(self, ts: float) -> None:
         self.session_start_ts = ts
 
-    def start_recording(self) -> None:
-        self.recording = True
+    def reset_buffers(self) -> None:
+        """Called by VoiceRecorder before vc.start_recording() to clear prior session state."""
         self.audio_data = {}
         self._buffers = {}
         self._chunk_counts = {}
         self._emitted = []
 
-    def stop_recording(self) -> None:
-        self.recording = False
-
     def _duration_seconds(self, n_bytes: int) -> float:
         return n_bytes / float(self._bytes_per_second)
 
-    def process_audio(self, user, data: voice_recv.VoiceData):
+    def write(self, data: bytes, user: int) -> None:
         """
-        Called by the voice receive client frequently. Must be fast and non-blocking.
+        Called by pycord for every audio packet during active recording.
+        data: raw PCM bytes; user: int user_id (NOTE: order is reversed vs voice_recv).
+        Must be fast and non-blocking.
         """
-        if not self.recording:
-            return
-
-        buf_io = self.audio_data.get(user.id)
+        buf_io = self.audio_data.get(user)
         if buf_io is None:
             buf_io = io.BytesIO()
-            self.audio_data[user.id] = buf_io
-        buf_io.write(data.pcm)
+            self.audio_data[user] = buf_io
+        buf_io.write(data)
 
         try:
-            uid = user.id
-            buf = self._buffers.setdefault(uid, bytearray())
-            buf.extend(data.pcm)
+            buf = self._buffers.setdefault(user, bytearray())
+            buf.extend(data)
 
             # Emit chunks while we have at least one full window
             while len(buf) >= self._window_bytes:
-                idx = self._chunk_counts.get(uid, 0) + 1
-                self._chunk_counts[uid] = idx
+                idx = self._chunk_counts.get(user, 0) + 1
+                self._chunk_counts[user] = idx
 
                 chunk_pcm = bytes(buf[:self._window_bytes])
 
                 # Compute approximate timestamps based on cumulative audio emitted per user
                 # (This is not perfect diarization timing, but it's consistent and useful.)
-                if self.session_start_ts is None:
-                    base = time.time()
-                else:
-                    base = self.session_start_ts
+                base = self.session_start_ts if self.session_start_ts is not None else time.time()
 
                 # Total seconds emitted for this user before this chunk:
                 emitted_seconds = (idx - 1) * (self.window_seconds - self.overlap_seconds)
@@ -171,7 +154,7 @@ class TranscriptionSink(voice_recv.BasicSink):
                 t_end = t_start + self.window_seconds
 
                 self._emitted.append(AudioChunk(
-                    user_id=uid,
+                    user_id=user,
                     chunk_index=idx,
                     pcm=chunk_pcm,
                     t_start=t_start,
@@ -183,6 +166,10 @@ class TranscriptionSink(voice_recv.BasicSink):
                 buf[:] = buf[keep_from:]
         except Exception as e:
             logging.error(f"Error processing audio for user {user}: {e}")
+
+    def cleanup(self) -> None:
+        """Pycord calls this after stop_recording; buffers are consumed in the async callback."""
+        pass
 
     def flush_and_transcribe(self, session_dir: str) -> list[dict]: # The whisper model is always loaded into the main process, causing the entire event loop to get blocked while the model loads/trascribes
         segments: list[dict] = []
@@ -306,10 +293,7 @@ class VoiceRecorder(commands.Cog):
             return
 
         try: # Perhaps I can split this onto a seperate thread, and have it write every time it performs a transcription.
-            self.voice_client = await ctx.author.voice.channel.connect(
-                cls=voice_recv.VoiceRecvClient,
-                reconnect=False    
-            )
+            self.voice_client = await ctx.author.voice.channel.connect(reconnect=False)
             model_name = config.get("WHISPER_MODEL", "small.en")
 
             self.sink = TranscriptionSink(
@@ -318,8 +302,7 @@ class VoiceRecorder(commands.Cog):
                 overlap_seconds=config.get("CHUNK_OVERLAP_SECONDS", 5.0),
                 min_flush_seconds=config.get("CHUNK_MIN_FLUSH_SECONDS", 3.0),
             )
-            self.voice_client.listen(self.sink)
-            await ctx.send("Connected and listening. Use !start_recording to begin.")
+            await ctx.send("Connected. Use !start_recording to begin.")
         except Exception as e:
             await ctx.send(f"Failed to connect: {e}")
 
@@ -350,7 +333,8 @@ class VoiceRecorder(commands.Cog):
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
         self.session_start_ts = time.time()
         self.sink.set_session_start(self.session_start_ts)
-        self.sink.start_recording()
+        self.sink.reset_buffers()
+        self.voice_client.start_recording(self.sink, self._on_recording_finished, ctx)
 
         self.recording = True
         self.transcripts = []
@@ -363,10 +347,14 @@ class VoiceRecorder(commands.Cog):
             return
 
         self.recording = False
-        if self.sink:
-            self.sink.stop_recording()
+        if self.voice_client and self.voice_client.is_connected():
+            self.voice_client.stop_recording()
+        await ctx.send("Stopping recording... transcription will complete shortly.")
+
+    async def _on_recording_finished(self, sink: TranscriptionSink, ctx) -> None:
+        """Fired asynchronously by pycord after vc.stop_recording() completes."""
         await self.write_transcription_offline()
-        await ctx.send("Stopped recording and saved transcript.")
+        await ctx.send("Recording stopped and transcript saved.")
 
     async def write_transcription_offline(self):
         if not self.session_id:
