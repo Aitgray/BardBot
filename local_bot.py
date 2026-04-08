@@ -563,7 +563,7 @@ async def main():
         os.makedirs("sessions")
 
     async with bot:
-        await bot.add_cog(VoiceRecorder(bot))
+        bot.add_cog(VoiceRecorder(bot))
         await bot.start(DISCORD_BOT_TOKEN)
 
 if __name__ == "__main__":
